@@ -1,0 +1,14 @@
+.venv/
+.DS_Store
+review_web/node_modules/
+review_web/dist/
+config/local.env
+config/outbox-service.env
+config/outbox-docker.env
+outputs/runs/
+outputs/review-runs/
+outputs/poller/
+reports/latest.html
+tmp/
+__pycache__/
+*.pyc

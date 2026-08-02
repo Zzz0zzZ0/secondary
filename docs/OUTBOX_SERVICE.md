@@ -1,0 +1,62 @@
+# Outbox HTTP Service
+
+The service exposes PostgreSQL Outbox deliveries without giving consumers database access.
+
+For a step-by-step Chinese consumer integration guide, see
+[`OUTBOX_DOWNSTREAM_INTEGRATION_GUIDE_CN.md`](OUTBOX_DOWNSTREAM_INTEGRATION_GUIDE_CN.md).
+
+## Consumer protocol
+
+1. `POST /v1/deliveries/claim`
+2. `POST /v1/deliveries/{id}/heartbeat` when processing approaches the lease interval
+3. `POST /v1/deliveries/{id}/complete` after confirmed provider acceptance
+4. `POST /v1/deliveries/{id}/fail` with `retryable`, `permanent`, or `unknown`
+
+Use `unknown` whenever the provider may have accepted the message but the result cannot be confirmed.
+Do not automatically retry an `unknown` delivery.
+
+Every consumer sends `Authorization: Bearer <token>`. Configure token scopes as:
+
+```dotenv
+OUTBOX_CONSUMER_TOKENS_JSON='{"email-secret":["email:email"],"linkedin-secret":["linkedin:linkedin"]}'
+```
+
+Producer and administrative endpoints use a separate `OUTBOX_PRODUCER_TOKEN`.
+
+## Local startup
+
+Apply migrations first:
+
+```bash
+./bin/twenty-hermes migrate
+```
+
+Generate local API tokens once, then run:
+
+```bash
+./scripts/setup_outbox_service_config.sh
+./bin/start-outbox-service
+./bin/start-outbox-reaper
+```
+
+OpenAPI is available at `http://127.0.0.1:8010/docs`.
+
+## Docker
+
+Copy `config/outbox-service.env.example` to `config/outbox-docker.env`, replace the
+database password and all API tokens, and run:
+
+```bash
+docker compose --env-file config/outbox-docker.env -f compose.outbox.yaml up -d --build
+```
+
+The default configuration connects containers to the existing host database on port `55432`.
+The optional `standalone-db` profile starts a separate PostgreSQL instance on port `55433`;
+when using it, set `OUTBOX_DB_HOST=outbox-postgres` and `OUTBOX_DB_PORT=5432`.
+
+## Client libraries
+
+- `clients/python/outbox_client.py`
+- `clients/typescript/outbox-client.ts`
+
+Both clients implement claim, heartbeat, complete, and fail without external runtime dependencies.

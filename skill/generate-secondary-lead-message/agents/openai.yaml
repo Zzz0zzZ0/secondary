@@ -1,0 +1,4 @@
+interface:
+  display_name: "Secondary Lead Message"
+  short_description: "Generate safe, usable B2B sales replies and follow-ups"
+  default_prompt: "Use $generate-secondary-lead-message to draft a review-ready customer message from one CRM record."

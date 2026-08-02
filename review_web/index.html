@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Twenty CRM 二级线索 Hermes 消息生成审阅工具" />
+    <title>Hermes 消息审阅</title>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Aceler International · Review Only</p>
+          <h1>Hermes 消息审阅</h1>
+          <p id="review-mode-description">消息预览读取本地已排期线索，不改变排期、不写入 Outbox，也不会发送邮件。</p>
+        </div>
+        <div class="hero-badges">
+          <button id="review-mode-toggle" class="safety review-toggle" type="button" disabled>审阅模式读取中</button>
+          <span class="safety">页面发信已禁用</span>
+        </div>
+      </header>
+
+      <section class="polling-dashboard" aria-labelledby="dashboard-title">
+        <div class="dashboard-heading">
+          <div>
+            <p class="eyebrow dashboard-eyebrow">Secondary lead scheduler</p>
+            <h2 id="dashboard-title">二级线索运行看板</h2>
+            <p id="dashboard-updated" class="muted">正在读取本地调度状态…</p>
+          </div>
+          <button id="dashboard-refresh" type="button">刷新看板</button>
+        </div>
+
+        <div id="runtime-mode" class="runtime-mode unknown" aria-live="polite">
+          正在读取调度器运行模式…
+        </div>
+
+        <div id="dashboard-stats" class="dashboard-stats" aria-live="polite"></div>
+
+        <div class="dashboard-section">
+          <div class="dashboard-section-title">
+            <h3>处理流程</h3>
+            <span class="muted">点击阶段查看对应线索</span>
+          </div>
+          <div id="process-flow" class="process-flow"></div>
+        </div>
+
+        <div class="dashboard-grid">
+          <section class="dashboard-panel">
+            <div class="dashboard-section-title">
+              <h3>未来 30 天排期</h3>
+              <span id="upcoming-total" class="muted"></span>
+            </div>
+            <div class="upcoming-legend" aria-label="排期图例">
+              <span><i class="legend-dot classification"></i>待分类</span>
+              <span><i class="legend-dot action"></i>待生成消息</span>
+            </div>
+            <div id="scheduler-times" class="scheduler-times"></div>
+            <div id="upcoming-chart" class="upcoming-chart"></div>
+          </section>
+
+          <section class="dashboard-panel">
+            <div class="dashboard-section-title">
+              <h3>最近运行</h3>
+              <span class="muted">只读审计</span>
+            </div>
+            <div id="run-history" class="run-history"></div>
+          </section>
+        </div>
+
+        <section class="dashboard-panel event-panel">
+          <div class="dashboard-section-title">
+            <h3>最近状态变化</h3>
+            <span class="muted">本地事件记录</span>
+          </div>
+          <div id="recent-events" class="recent-events"></div>
+        </section>
+      </section>
+
+      <section class="control-panel">
+        <form id="run-form">
+          <label>预览数量<input id="limit" type="number" min="1" max="20" value="5" required /></label>
+          <div class="channel-rule"><span>生成渠道</span><strong>自动（邮箱优先）</strong></div>
+          <label>取样方式
+            <select id="sort">
+              <option value="next_action">最早排期</option>
+              <option value="recently_classified">最近分类</option>
+              <option value="random">随机抽样</option>
+            </select>
+          </label>
+          <button id="start-button" type="submit">从已排期线索生成预览</button>
+          <button id="review-messages-button" type="button">审核待发送消息</button>
+          <button id="poll-queue-button" type="button">查看二级线索队列</button>
+        </form>
+        <div id="status" class="status" aria-live="polite">预览仅保存到本地审阅结果，不进入 Outbox</div>
+      </section>
+
+      <section id="summary" class="summary hidden"></section>
+      <section id="workspace" class="workspace hidden">
+        <aside>
+          <div class="section-title"><h2 id="record-list-title">生成结果</h2><span id="record-count"></span></div>
+          <div id="record-list" class="record-list"></div>
+        </aside>
+        <article id="detail" class="detail"></article>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

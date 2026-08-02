@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_PATH="$PROJECT_DIR/config/local.env"
+PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+WEB_DIR="$PROJECT_DIR/review_web"
+
+if [[ -f "$CONFIG_PATH" ]]; then
+  set -a
+  source "$CONFIG_PATH"
+  set +a
+fi
+
+PORT="${REVIEW_UI_PORT:-8000}"
+REVIEW_BIND_HOST="${REVIEW_UI_HOST:-0.0.0.0}"
+
+if [[ -z "${TWENTY_DB_HOST:-}" ]]; then
+  printf 'Missing CRM configuration. Run: %s/bin/twenty-hermes configure\n' "$PROJECT_DIR" >&2
+  exit 2
+fi
+if [[ -z "${TWENTY_DB_PASSWORD:-}" ]]; then
+  read -r -s -p "Twenty database password (stored in local.env): " TWENTY_DB_PASSWORD
+  printf '\n'
+  if [[ -z "$TWENTY_DB_PASSWORD" ]]; then
+    printf 'Database password cannot be empty.\n' >&2
+    exit 2
+  fi
+  export TWENTY_DB_PASSWORD
+  umask 077
+  printf 'TWENTY_DB_PASSWORD=%q\n' "$TWENTY_DB_PASSWORD" >>"$CONFIG_PATH"
+  chmod 600 "$CONFIG_PATH"
+fi
+if [[ ! -x "$PYTHON_BIN" ]] || ! "$PYTHON_BIN" -c 'import fastapi, uvicorn' >/dev/null 2>&1; then
+  printf 'Missing review API dependencies. Run: %s/scripts/setup_python.sh\n' "$PROJECT_DIR" >&2
+  exit 2
+fi
+if ! (cd "$PROJECT_DIR" && "$PYTHON_BIN" -c 'from app.outbox import preflight; preflight()'); then
+  printf 'Review actions require a working Outbox database connection.\n' >&2
+  exit 2
+fi
+if [[ ! -f "$WEB_DIR/dist/index.html" ]] \
+  || [[ "${REVIEW_UI_REBUILD:-false}" == "true" ]]; then
+  if [[ ! -d "$WEB_DIR/node_modules" ]]; then
+    (cd "$WEB_DIR" && npm ci)
+  fi
+  (cd "$WEB_DIR" && npm run build)
+fi
+
+export OUTBOX_AUTO_IMPORT=false
+export GMAIL_SEND_ENABLED=false
+export EMAIL_LIVE_SEND_ENABLED=false
+
+"$PYTHON_BIN" -m uvicorn review_api.main:app --app-dir "$PROJECT_DIR" --host "$REVIEW_BIND_HOST" --port "$PORT" &
+SERVER_PID="$!"
+trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT INT TERM
+
+URL="http://127.0.0.1:$PORT"
+printf 'Review API listening on %s:%s\n' "$REVIEW_BIND_HOST" "$PORT"
+for _ in {1..40}; do
+  if curl -fsS "$URL/api/health" >/dev/null 2>&1; then
+    LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+    if [[ -n "$LAN_IP" ]]; then
+      printf 'Internal network URL: http://%s:%s\n' "$LAN_IP" "$PORT"
+    fi
+    open "$URL" 2>/dev/null || printf 'Open %s\n' "$URL"
+    wait "$SERVER_PID"
+    exit $?
+  fi
+  sleep 0.25
+done
+
+printf 'Review API failed to start on %s\n' "$URL" >&2
+exit 2

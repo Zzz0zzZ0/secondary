@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_PATH="$PROJECT_DIR/config/local.env"
+SERVICE_CONFIG_PATH="$PROJECT_DIR/config/outbox-service.env"
+PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+
+if [[ -f "$CONFIG_PATH" ]]; then
+  set -a
+  source "$CONFIG_PATH"
+  set +a
+fi
+if [[ -f "$SERVICE_CONFIG_PATH" ]]; then
+  set -a
+  source "$SERVICE_CONFIG_PATH"
+  set +a
+fi
+
+if [[ -z "${OUTBOX_DATABASE_URL:-}" && -z "${OUTBOX_DB_PASSWORD:-}" && -n "${OUTBOX_KEYCHAIN_SERVICE:-}" ]]; then
+  OUTBOX_DB_PASSWORD="$(security find-generic-password -w -s "$OUTBOX_KEYCHAIN_SERVICE" -a "$OUTBOX_DB_USER" 2>/dev/null || true)"
+  [[ -z "$OUTBOX_DB_PASSWORD" ]] || export OUTBOX_DB_PASSWORD
+fi
+
+if [[ -z "${OUTBOX_DATABASE_URL:-}" && -z "${OUTBOX_DB_PASSWORD:-}" ]]; then
+  printf 'Missing Outbox database password or OUTBOX_DATABASE_URL.\n' >&2
+  exit 2
+fi
+if [[ -z "${OUTBOX_CONSUMER_TOKENS_JSON:-}" || -z "${OUTBOX_PRODUCER_TOKEN:-}" ]]; then
+  printf 'Set OUTBOX_CONSUMER_TOKENS_JSON and OUTBOX_PRODUCER_TOKEN before starting.\n' >&2
+  exit 2
+fi
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  printf 'Python environment missing. Run: %s/scripts/setup_python.sh\n' "$PROJECT_DIR" >&2
+  exit 2
+fi
+
+OUTBOX_API_BIND="${OUTBOX_API_HOST:-0.0.0.0}"
+OUTBOX_API_LISTEN_PORT="${OUTBOX_API_PORT:-8010}"
+printf 'Outbox API listening on %s:%s\n' "$OUTBOX_API_BIND" "$OUTBOX_API_LISTEN_PORT"
+exec "$PYTHON_BIN" -m uvicorn outbox_api.main:app \
+  --app-dir "$PROJECT_DIR" \
+  --host "$OUTBOX_API_BIND" \
+  --port "$OUTBOX_API_LISTEN_PORT"

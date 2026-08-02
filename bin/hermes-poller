@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_PATH="$PROJECT_DIR/config/local.env"
+PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+COMMAND="${1:-}"
+
+if [[ -f "$CONFIG_PATH" ]]; then
+  set -a
+  source "$CONFIG_PATH"
+  set +a
+fi
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  printf 'Python environment missing. Run: %s/scripts/setup_python.sh\n' "$PROJECT_DIR" >&2
+  exit 2
+fi
+
+if [[ "$COMMAND" == "once" || "$COMMAND" == "scan" || "$COMMAND" == "dispatch" ]]; then
+  for name in TWENTY_DB_HOST TWENTY_DB_PORT TWENTY_DB_NAME TWENTY_DB_USER TWENTY_DB_PASSWORD; do
+    if [[ -z "${!name:-}" ]]; then
+      printf 'Missing required polling configuration: %s\n' "$name" >&2
+      exit 2
+    fi
+  done
+fi
+
+if [[ "$COMMAND" == "once" || "$COMMAND" == "dispatch" ]]; then
+  for name in OUTBOX_DB_HOST OUTBOX_DB_PORT OUTBOX_DB_NAME OUTBOX_DB_USER; do
+    if [[ -z "${!name:-}" ]]; then
+      printf 'Missing required Outbox configuration: %s\n' "$name" >&2
+      exit 2
+    fi
+  done
+  if ! "$PYTHON_BIN" -m app.cli outbox-preflight >/dev/null; then
+    printf 'Outbox preflight failed. Configure its password/keychain and apply migrations before starting automatic dispatch.\n' >&2
+    exit 2
+  fi
+fi
+
+exec "$PYTHON_BIN" -m app.secondary_scheduler "$@"

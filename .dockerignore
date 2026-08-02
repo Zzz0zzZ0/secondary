@@ -1,0 +1,15 @@
+.git
+.venv
+__pycache__
+*.pyc
+config/local.env
+config/outbox-service.env
+config/outbox-docker.env
+outputs
+reports
+review_web/node_modules
+review_web/dist
+clients
+docs
+skill
+tests
