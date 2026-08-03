@@ -77,17 +77,27 @@ for the current `contact`. Do not use local pattern matching, do not select the
 customer's own sign-off name or a third party, and return `null` when the speaker
 or addressee is ambiguous.
 
-For an explicit referred contact, the input `contact` is already the referred
-person and remains the message recipient. Return `recommended_by` as an array of
-the people who recommended that current contact. Every recommender must have an
-exact name and an exact supporting quote from `lead.internal_note`; the name must
-occur inside that quote. Do not return the current contact as a target, do not
-replace the contact, and do not require the current contact's name or LinkedIn URL
-to be repeated in the note. Return an empty array when no recommender is fully
-grounded.
+For an explicit referral record, preserve the direction stated in
+`lead.internal_note`:
+
+- when the note says the current `contact` recommended or introduced another
+  person, set `referral_relationship.current_contact_role` to `recommender` and
+  return the mentioned person in `related_contacts`;
+- when the note says the current `contact` was recommended or introduced by
+  another person, set `referral_relationship.current_contact_role` to
+  `referred` and return the mentioned recommender in `related_contacts`.
+
+Do not reverse these roles merely because the record is classified as
+`referred`. Each related contact must have an exact name and an exact supporting
+quote from `lead.internal_note`; the name must occur inside that quote. The
+current contact remains the message recipient and does not need to be repeated
+in the note. Use `null` for `referral_relationship` when the lead is not a
+referral or when the direction is ambiguous. Keep `recommended_by` for backward
+compatibility: populate it only when the current contact is the referred person;
+otherwise return an empty array.
 
 Return exactly one object matching
 [references/output-schema.md](references/output-schema.md). Use `null` for
 `customer_used_sender_name` when no unambiguous customer-used sender name is
 present, and use `[]` for `recommended_by` when no recommender is fully
-grounded.
+grounded. Always include `referral_relationship`.

@@ -1,6 +1,8 @@
 import copy
 from typing import Any, Dict, List, Optional
 
+from .sender_identity import resolve_sender_identity
+
 
 GENERATION_BLOCK_WARNING = (
     "MESSAGE_GENERATION_BLOCKED_INSUFFICIENT_CRM_EVIDENCE"
@@ -9,6 +11,12 @@ COMPANY_CONTEXT_WARNINGS = {
     "COMPANY_CONTEXT_MISSING",
     "COMPANY_CONTEXT_THIN",
 }
+
+
+def _mapped_sender_name(record: Dict[str, Any]) -> Optional[str]:
+    sales_name = (record.get("sales") or {}).get("name")
+    identity = resolve_sender_identity(sales_name)
+    return identity["display_name"] if identity is not None else None
 
 
 def generation_eligibility(
@@ -72,8 +80,34 @@ def prepare_message_record(
                 "evidence_quote": sender_name.get("evidence_quote"),
                 "source": "classification.customer_used_sender_name",
             }
+        relationship = classification.get("referral_relationship")
+        if isinstance(relationship, dict):
+            current_role = relationship.get("current_contact_role")
+            related_contacts = [
+                copy.deepcopy(item)
+                for item in relationship.get("related_contacts", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and item["name"].strip()
+            ]
+            if current_role in {"recommender", "referred"} and related_contacts:
+                record["referral_context"] = {
+                    "current_contact_role": current_role,
+                    "related_contacts": related_contacts,
+                    "source": "classification.referral_relationship",
+                }
+                names = [item["name"].strip() for item in related_contacts]
+                if current_role == "referred":
+                    lead["recommended_by"] = " and ".join(names)
+                else:
+                    lead["referred_contacts"] = " and ".join(names)
+
         recommended_by = classification.get("recommended_by")
-        if isinstance(recommended_by, list) and recommended_by:
+        if (
+            "referral_context" not in record
+            and isinstance(recommended_by, list)
+            and recommended_by
+        ):
             recommenders = [
                 copy.deepcopy(item)
                 for item in recommended_by
@@ -82,11 +116,24 @@ def prepare_message_record(
                 and item["name"].strip()
             ]
             names = [item["name"].strip() for item in recommenders]
-            lead["recommended_by"] = " and ".join(names)
-            record["referral_context"] = {
-                "recommended_by": recommenders,
-                "source": "classification.recommended_by",
-            }
+            current_contact_name = str(
+                (record.get("contact") or {}).get("name") or ""
+            ).strip()
+            if current_contact_name and any(
+                name.casefold() == current_contact_name.casefold() for name in names
+            ):
+                record["referral_context"] = {
+                    "current_contact_role": "recommender",
+                    "related_contacts": [],
+                    "source": "legacy.classification.recommended_by",
+                }
+            else:
+                lead["recommended_by"] = " and ".join(names)
+                record["referral_context"] = {
+                    "current_contact_role": "referred",
+                    "related_contacts": recommenders,
+                    "source": "legacy.classification.recommended_by",
+                }
 
     eligibility = generation_eligibility(source_record, classification)
     record["message_generation_eligibility"] = eligibility
@@ -210,7 +257,7 @@ def validation_errors(
         ):
             errors.append("LinkedIn消息不应包含主题")
         sender_identity = crm_input.get("conversation_sender_identity") or {}
-        sender_name = sender_identity.get("name")
+        sender_name = _mapped_sender_name(crm_input) or sender_identity.get("name")
         if output_type == "email" and isinstance(sender_name, str):
             for field, label in (
                 ("body", "客户正文"),

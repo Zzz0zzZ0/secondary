@@ -124,6 +124,25 @@ Review UI 顶部按钮可即时开启或关闭人工审阅。实际运行值保�
 `once`、`scan` 和 `dispatch` 仍保持严格模式：缺少对应数据库配置或连接失败时直接退出。
 离线模式不会获取新的 CRM 数据，也不会写入 Outbox。
 
+## 当日运行报告
+
+默认手动报告按 `TWENTY_BUSINESS_TIMEZONE`（默认 `Asia/Shanghai`）统计当天 00:00 至
+实际触发时刻，分别呈现窗口内发生的流量和报告生成时的当前积压。同一天再次触发会更新
+当日归档。任一数据源读取失败时仍会归档报告，但会明确标记“数据不完整”，不会把缺失
+数据按 0 处理。
+
+```bash
+# 生成今天 00:00 至当前时刻
+./bin/hermes-runtime-report
+
+# 补生成指定日期
+./bin/hermes-runtime-report --date 2026-08-02
+```
+
+报告保存在 `outputs/runtime-reports/<日期>.json` 和 `<日期>.md`，权限为仅当前用户可读写。
+Review UI 提供“生成当日报告”、只读查看和下载。系统不会自动生成，也不通过业务 Outbox
+发送；报告由人工触发并提交。可用 `HERMES_RUNTIME_REPORT_DIR` 覆盖归档目录。
+
 本机常驻运行建议把 Outbox 密码交互式保存到 macOS 钥匙串，不写入配置文件：
 
 ```bash

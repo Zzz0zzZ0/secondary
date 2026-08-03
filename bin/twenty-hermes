@@ -138,18 +138,6 @@ gmail_auth() {
   python_cli gmail-auth
 }
 
-gmail_dry_run() {
-  prompt_outbox_password
-  python_cli dry-run
-}
-
-gmail_send_once() {
-  printf 'Gmail safety mode: GMAIL_SEND_ENABLED=%s, EMAIL_SEND_MODE=%s, EMAIL_LIVE_SEND_ENABLED=%s\n' \
-    "${GMAIL_SEND_ENABLED:-false}" "${EMAIL_SEND_MODE:-redirect}" "${EMAIL_LIVE_SEND_ENABLED:-false}"
-  prompt_outbox_password
-  python_cli send-once
-}
-
 ensure_config() {
   load_config
   if [[ -z "${TWENTY_DB_HOST:-}" ]]; then
@@ -251,9 +239,7 @@ menu() {
     printf '10) List review messages and Outbox\n'
     printf '11) Approve one message and enqueue it\n'
     printf '12) Authorize Gmail send-only access\n'
-    printf '13) Preview next Gmail delivery (no send)\n'
-    printf '14) Send one Gmail delivery\n'
-    printf '15) Compare CRM and Skill product catalogs\n'
+    printf '13) Compare CRM and Skill product catalogs\n'
     printf '0) Exit\n'
     read -r -p 'Select: ' menu_choice
     case "$menu_choice" in
@@ -269,9 +255,7 @@ menu() {
       10) outbox_list ;;
       11) outbox_approve ;;
       12) gmail_auth ;;
-      13) gmail_dry_run ;;
-      14) gmail_send_once ;;
-      15) compare_products ;;
+      13) compare_products ;;
       0) return 0 ;;
       *) printf 'Unknown selection.\n' ;;
     esac
@@ -297,10 +281,8 @@ case "${1:-menu}" in
   approve) shift; prompt_outbox_password; python_cli approve "$@" ;;
   show) shift; prompt_outbox_password; python_cli show "$@" ;;
   gmail-auth) gmail_auth ;;
-  dry-run) gmail_dry_run ;;
-  send-once) gmail_send_once ;;
   *)
-    printf 'Usage: %s [menu|configure|check|discover|export|products|run|report [RUN_DIR]|open|setup|migrate|queue|show ID|approve ...|gmail-auth|dry-run|send-once]\n' "$0" >&2
+    printf 'Usage: %s [menu|configure|check|discover|export|products|run|report [RUN_DIR]|open|setup|migrate|queue|show ID|approve ...|gmail-auth]\n' "$0" >&2
     exit 2
     ;;
 esac

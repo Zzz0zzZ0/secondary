@@ -8,6 +8,7 @@ export type Delivery = {
   channel: "email" | "linkedin";
   provider: string;
   recipient: string;
+  sender_account_ref?: string | null;
   payload: Record<string, unknown>;
   metadata: { lead_id?: string; attempt_no: number };
 };

@@ -1,11 +1,10 @@
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 from .db import apply_migrations
-from .gmail_sender import authorize, preflight
+from .gmail_sender import authorize
 from .outbox import (
     approve_message,
     get_message,
@@ -14,7 +13,6 @@ from .outbox import (
     list_outbox,
     preflight as outbox_preflight,
 )
-from .worker import dry_run_one, send_once
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -46,8 +44,6 @@ def main(argv=None):
     outbox_parser.add_argument("--limit", type=int, default=20)
     sub.add_parser("gmail-auth")
     sub.add_parser("outbox-preflight")
-    sub.add_parser("dry-run")
-    sub.add_parser("send-once")
     args = parser.parse_args(argv)
 
     if args.command == "migrate":
@@ -81,13 +77,6 @@ def main(argv=None):
         print(f"Token saved: {authorize()}")
     elif args.command == "outbox-preflight":
         print(json.dumps(outbox_preflight()))
-    elif args.command == "dry-run":
-        print(json.dumps(dry_run_one(), ensure_ascii=False, indent=2, default=str))
-    elif args.command == "send-once":
-        if os.getenv("GMAIL_SEND_ENABLED", "false").lower() != "true":
-            raise RuntimeError("Sending is disabled; set GMAIL_SEND_ENABLED=true explicitly")
-        preflight()
-        print(json.dumps(send_once(), ensure_ascii=False, indent=2, default=str))
     return 0
 
 

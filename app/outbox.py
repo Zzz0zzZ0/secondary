@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from .db import connect
 from .secondary.message_policy import validation_errors
+from .secondary.sender_identity import resolve_sender_identity
 from .secondary_signals import notify_secondary_outbox_event
 
 
@@ -276,6 +277,8 @@ def approve_message(message_id, reviewer, subject=None, body=None, note=None):
             row = _pending_message(cursor, message_id)
             original = row[4]
             channel = row[8]
+            crm = row[3]
+            sender_account_ref = None
             effective = json.loads(json.dumps(row[5] or original))
             content = dict(effective.get("content") or {})
             final_subject = subject if subject is not None else content.get("subject")
@@ -289,6 +292,16 @@ def approve_message(message_id, reviewer, subject=None, body=None, note=None):
                     raise RuntimeError("Email subject must not contain line breaks")
                 if not valid_email(row[2]):
                     raise RuntimeError("Recipient email is invalid")
+                sender_identity = resolve_sender_identity(
+                    (crm.get("sales") or {}).get("name")
+                )
+                if sender_identity is None or not valid_email(
+                    sender_identity.get("account")
+                ):
+                    raise RuntimeError(
+                        "Approved email requires a valid sender account mapping"
+                    )
+                sender_account_ref = f"email:{sender_identity['account']}"
             elif channel == "linkedin":
                 final_subject = None
                 if not valid_linkedin(row[2]):
@@ -318,7 +331,6 @@ def approve_message(message_id, reviewer, subject=None, body=None, note=None):
                 (approval_id, message_id, reviewer, note),
             )
 
-            crm = row[3]
             payload = {
                 "lead_id": row[1],
                 "to": row[2],
@@ -338,8 +350,8 @@ def approve_message(message_id, reviewer, subject=None, body=None, note=None):
                 """
                 INSERT INTO sales_automation.delivery_outbox
                   (id, message_version_id, channel, provider, recipient_original,
-                   payload, payload_sha256, idempotency_key)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   sender_account_ref, payload, payload_sha256, idempotency_key)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     outbox_id,
@@ -347,6 +359,7 @@ def approve_message(message_id, reviewer, subject=None, body=None, note=None):
                     channel,
                     provider,
                     row[2],
+                    sender_account_ref,
                     _json(payload),
                     digest,
                     idempotency_key,

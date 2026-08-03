@@ -94,6 +94,7 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/claim" \
   "channel": "email",
   "provider": "email",
   "recipient": "customer@example.com",
+  "sender_account_ref": "email:chloe@okgminerals.com",
   "payload": {
     "to": "customer@example.com",
     "subject": "邮件主题",
@@ -112,6 +113,7 @@ Email 消费者至少检查：
 - `channel == "email"`；
 - `provider == "email"`；
 - `recipient` 是有效邮箱；
+- `sender_account_ref` 是 `email:<完整邮箱>`，并映射到本地已配置账号；
 - `payload.to` 与 `recipient` 完全一致；
 - `payload.subject` 和 `payload.body` 非空；
 - `delivery_id`、`lease_token`、`idempotency_key` 非空。
@@ -125,8 +127,8 @@ LinkedIn 消费者至少检查：
 
 ## 6. 发信结果回写
 
-任务领取后，后续请求必须继续使用原来的 `worker_id`、`delivery_id` 和
-`lease_token`。
+任务领取后，后续请求继续提交原来的 `worker_id`、`delivery_id` 和 `lease_token`，
+以保持接口兼容；服务端使用 `delivery_id` 和 `lease_token` 判断当前租约所有权。
 
 ### 处理时间较长：续租
 
@@ -156,7 +158,8 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/$DELIVERY_ID/complete" \
   }"
 ```
 
-平台没有会话 ID 时可将 `provider_thread_id` 设为 `null` 或省略。
+现有消费者可以继续传 `provider_message_id` 和 `provider_thread_id`，API 会兼容接收，
+但 Outbox 不再保存这两个字段。新消费者可以将二者设为 `null` 或省略。
 
 ### 发送失败
 
@@ -257,10 +260,11 @@ claim → 校验任务 → 按 idempotency_key 查重 → 调用发信平台
 
 ## 8. 幂等要求
 
-消费者必须持久化 `idempotency_key` 和平台返回的消息 ID。
+消费者必须持久化 `idempotency_key` 及对应的发送结果。平台返回的消息 ID 可按下游自身
+排障需要保留，但不必回写或保存到 Outbox。
 
 如果发信平台已经接受消息，但消费者在调用 `complete` 前崩溃，任务可能再次出现。此时
-应根据 `idempotency_key` 找到原发送结果并完成回写，不能再次发送同一封消息。
+应根据 `idempotency_key` 找到原发送结果并调用 `complete`，不能再次发送同一封消息。
 
 ## 9. 联调通过标准
 

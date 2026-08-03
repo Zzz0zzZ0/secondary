@@ -85,6 +85,17 @@ EMAIL_LIVE_SEND_ENABLED=false
 Review UI 可查看二级线索队列并从已排期记录生成消息预览。详细说明见
 [`docs/HERMES_POLLING.md`](docs/HERMES_POLLING.md)。
 
+当日运行报告按上海时区当天 00:00 至手动触发时刻汇总，只读访问调度 SQLite 和 Outbox
+PostgreSQL，输出到 `outputs/runtime-reports/`。可在 Review UI 点击“生成当日报告”，
+或使用命令行手动生成：
+
+```bash
+./bin/hermes-runtime-report
+```
+
+同一天再次触发会更新当日归档。Review UI 可查看并下载 JSON/Markdown；报告不会自动
+生成、发送或提交。
+
 ## Outbox 链路
 
 ```text
@@ -166,8 +177,6 @@ EMAIL_LIVE_SEND_ENABLED=true
 ./bin/twenty-hermes queue
 ./bin/twenty-hermes show MESSAGE_ID
 ./bin/twenty-hermes approve MESSAGE_ID --reviewer "Your Name" --yes
-./bin/twenty-hermes dry-run
-./bin/twenty-hermes send-once
 ```
 
 `products` 以只读事务读取 Twenty CRM `_product` 中未删除的 `name` 和

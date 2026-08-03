@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_PATH="$PROJECT_DIR/config/local.env"
+PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+
+if [[ -f "$CONFIG_PATH" ]]; then
+  set -a
+  source "$CONFIG_PATH"
+  set +a
+fi
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  printf 'Python environment missing. Run: %s/scripts/setup_python.sh\n' "$PROJECT_DIR" >&2
+  exit 2
+fi
+
+export PYTHONDONTWRITEBYTECODE=1
+exec "$PYTHON_BIN" -B -m app.runtime_report "$@"

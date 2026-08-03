@@ -27,6 +27,13 @@ The output must be one JSON object with exactly these semantic fields:
 - `recommended_by`: array of recommenders for the current contact. Each item
   contains an exact recommender `name` and an exact supporting `evidence_quote`
   from `lead.internal_note`. The current `contact` remains the recipient;
+- `referral_relationship`: object or `null`. For a fully grounded referral, the
+  object contains `current_contact_role` (`recommender` or `referred`) and
+  `related_contacts`, an array of the people mentioned in `lead.internal_note`
+  on the other side of that relationship. Each related contact contains an exact
+  `name` and an exact supporting `evidence_quote`. When the current contact is
+  the recommender, the related contacts are the referred people; when the
+  current contact is referred, the related contacts are the recommenders;
 - `review_required`: always `true`.
 
 Low information completeness does not require low confidence when

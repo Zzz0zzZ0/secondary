@@ -82,6 +82,7 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/claim" \
   "channel": "email",
   "provider": "email",
   "recipient": "customer@example.com",
+  "sender_account_ref": "email:chloe@okgminerals.com",
   "payload": {
     "to": "customer@example.com",
     "subject": "主题",
@@ -94,6 +95,8 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/claim" \
 
 - `channel` 和 `provider` 与当前下游一致；
 - `recipient` 非空且格式有效；
+- Email 的 `sender_account_ref` 是 `email:<完整邮箱>`；缺少有效销售映射时
+  审核批准失败；LinkedIn 暂为 `null`；
 - `payload.to` 与 `recipient` 完全一致；
 - Email 的主题和正文非空；
 - LinkedIn 的正文非空、主题为空；
@@ -109,7 +112,8 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/claim" \
 | 成功 | `POST /v1/deliveries/{id}/complete` | 平台明确确认发送成功 |
 | 失败 | `POST /v1/deliveries/{id}/fail` | 回报失败结果 |
 
-这三个接口都要提交原 `worker_id` 和 `lease_token`。
+这三个接口继续提交原 `worker_id` 和 `lease_token` 以保持接口兼容；服务端使用
+`delivery_id` 和 `lease_token` 判断当前租约所有权。
 
 失败结果：
 

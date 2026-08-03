@@ -109,6 +109,12 @@ type DashboardData = {
     status: string | null;
   }>;
 };
+type RuntimeReportSummary = {
+  date: string;
+  generated_at: string;
+  overall_status: "正常" | "有风险" | "异常";
+  complete: boolean;
+};
 type LeadDetail = {
   state: QueueRecord & {
     source_updated_at: string;
@@ -161,6 +167,13 @@ const runHistory = document.querySelector<HTMLElement>("#run-history")!;
 const recentEvents = document.querySelector<HTMLElement>("#recent-events")!;
 const reviewModeToggle = document.querySelector<HTMLButtonElement>("#review-mode-toggle")!;
 const reviewModeDescription = document.querySelector<HTMLElement>("#review-mode-description")!;
+const runtimeReportStatus = document.querySelector<HTMLElement>("#runtime-report-status")!;
+const runtimeReportDate = document.querySelector<HTMLSelectElement>("#runtime-report-date")!;
+const runtimeReportJson = document.querySelector<HTMLAnchorElement>("#runtime-report-json")!;
+const runtimeReportMarkdown = document.querySelector<HTMLAnchorElement>("#runtime-report-markdown")!;
+const runtimeReportGenerate = document.querySelector<HTMLButtonElement>("#runtime-report-generate")!;
+const runtimeReportRefresh = document.querySelector<HTMLButtonElement>("#runtime-report-refresh")!;
+const runtimeReportContent = document.querySelector<HTMLElement>("#runtime-report-content")!;
 let currentReviewEnabled: boolean | null = null;
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -533,6 +546,57 @@ async function loadDashboard() {
       error instanceof Error ? `看板读取失败：${error.message}` : "看板读取失败";
   } finally {
     dashboardRefresh.disabled = false;
+  }
+}
+
+async function loadRuntimeReport(reportDate: string) {
+  runtimeReportStatus.textContent = `正在读取 ${reportDate} 运行报告…`;
+  const response = await fetch(`/api/runtime-reports/${reportDate}/markdown`);
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || "运行报告读取失败");
+  }
+  runtimeReportContent.textContent = await response.text();
+  runtimeReportJson.href = `/api/runtime-reports/${reportDate}?download=true`;
+  runtimeReportMarkdown.href = `/api/runtime-reports/${reportDate}/markdown?download=true`;
+  runtimeReportJson.classList.remove("disabled");
+  runtimeReportMarkdown.classList.remove("disabled");
+}
+
+async function loadRuntimeReports() {
+  runtimeReportRefresh.disabled = true;
+  runtimeReportDate.disabled = true;
+  runtimeReportStatus.textContent = "正在读取已归档报告…";
+  try {
+    const result = await request<{ records: RuntimeReportSummary[] }>(
+      "/api/runtime-reports",
+    );
+    runtimeReportDate.replaceChildren(
+      ...result.records.map((report) => {
+        const option = document.createElement("option");
+        option.value = report.date;
+        option.textContent = `${report.date} · ${report.overall_status}${
+          report.complete ? "" : " · 数据不完整"
+        }`;
+        return option;
+      }),
+    );
+    if (!result.records.length) {
+      runtimeReportContent.textContent = "暂无运行报告";
+      runtimeReportStatus.textContent = "尚未手动生成报告";
+      return;
+    }
+    runtimeReportDate.disabled = false;
+    await loadRuntimeReport(runtimeReportDate.value);
+    const latest = result.records[0];
+    runtimeReportStatus.textContent =
+      `${latest.date} · ${latest.overall_status} · ` +
+      `${latest.complete ? "数据完整" : "数据不完整"} · 只读展示`;
+  } catch (error) {
+    runtimeReportStatus.textContent =
+      error instanceof Error ? `报告读取失败：${error.message}` : "报告读取失败";
+  } finally {
+    runtimeReportRefresh.disabled = false;
   }
 }
 
@@ -1040,6 +1104,7 @@ function renderQueueDetail(record: QueueRecord, leadDetail?: LeadDetail) {
   const lead = snapshot.lead || {};
   const company = snapshot.company || {};
   const contact = snapshot.contact || {};
+  const sales = snapshot.sales || {};
   const schedulePanel = document.createElement("div");
   schedulePanel.className = "panel";
   const heading = document.createElement("div");
@@ -1051,6 +1116,7 @@ function renderQueueDetail(record: QueueRecord, leadDetail?: LeadDetail) {
   [
     ["公司", company.name],
     ["联系人", contact.name],
+    ["销售人员", sales.name],
     ["联系人 ID", record.lead_id],
     ["分类", leadTypeLabels[record.lead_type || ""] || "待分类"],
     ["置信度", record.classification_confidence],
@@ -1337,6 +1403,41 @@ dashboardRefresh.addEventListener("click", () => {
   loadDashboard().catch(() => undefined);
 });
 
+runtimeReportRefresh.addEventListener("click", () => {
+  loadRuntimeReports().catch(() => undefined);
+});
+
+runtimeReportGenerate.addEventListener("click", async () => {
+  runtimeReportGenerate.disabled = true;
+  runtimeReportStatus.textContent = "正在生成今日 00:00 至当前时刻的运行报告…";
+  try {
+    const report = await request<RuntimeReportSummary>(
+      "/api/runtime-reports/generate",
+      { method: "POST" },
+    );
+    await loadRuntimeReports();
+    runtimeReportStatus.textContent =
+      `${report.date} · ${report.overall_status} · ` +
+      `${report.complete ? "数据完整" : "数据不完整"} · 已手动生成`;
+  } catch (error) {
+    runtimeReportStatus.textContent =
+      error instanceof Error ? `报告生成失败：${error.message}` : "报告生成失败";
+  } finally {
+    runtimeReportGenerate.disabled = false;
+  }
+});
+
+runtimeReportDate.addEventListener("change", () => {
+  loadRuntimeReport(runtimeReportDate.value)
+    .then(() => {
+      runtimeReportStatus.textContent = `${runtimeReportDate.value} · 只读展示`;
+    })
+    .catch((error) => {
+      runtimeReportStatus.textContent =
+        error instanceof Error ? `报告读取失败：${error.message}` : "报告读取失败";
+    });
+});
+
 reviewModeToggle.addEventListener("click", async () => {
   if (currentReviewEnabled === null) return;
   const enabled = !currentReviewEnabled;
@@ -1372,3 +1473,4 @@ reviewModeToggle.addEventListener("click", async () => {
 });
 
 loadDashboard().catch(() => undefined);
+loadRuntimeReports().catch(() => undefined);

@@ -5,7 +5,7 @@ outbound sender identity. Matching and usage rules are defined in `SKILL.md`.
 
 | CRM creator/member name | Sender display name | Sender account |
 |---|---|---|
-| `信文 于` | `Chloe` | `chloe@okgminerals.com` |
+| `倩文 于` | `Chloe` | `chloe@okgminerals.com` |
 | `阳淮 李` | `Xuemei Li` | `dean@okgminerals.com` |
 | `锐 沈` | `Xiaoxue Li` | `xiaoxue@okgminerals.com` |
 | `铖 沈` | `Xiaoxue Li` | `xiaoxue@okgminerals.com` |

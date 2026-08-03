@@ -19,6 +19,32 @@ def _optional_quote(value: Any, note: str, field: str) -> Optional[str]:
     return quote
 
 
+def _grounded_people(value: Any, note: str, field: str) -> list:
+    if not isinstance(value, list):
+        raise RuntimeError(f"Classification {field} must be an array")
+    normalized = []
+    seen_names = set()
+    for index, person in enumerate(value):
+        if not isinstance(person, dict):
+            raise RuntimeError(f"Classification {field}[{index}] is invalid")
+        name = _required_text(person.get("name"), f"{field}[{index}].name")
+        quote = _optional_quote(
+            person.get("evidence_quote"),
+            note,
+            f"{field}[{index}].evidence_quote",
+        )
+        if name not in note or quote is None or name not in quote:
+            raise RuntimeError(
+                f"Classification {field} must be fully grounded in CRM text"
+            )
+        normalized_name = name.casefold()
+        if normalized_name in seen_names:
+            raise RuntimeError(f"Classification {field} contains duplicates")
+        seen_names.add(normalized_name)
+        normalized.append({"name": name, "evidence_quote": quote})
+    return normalized
+
+
 def validate_classification(
     candidate: Dict[str, Any],
     record: Dict[str, Any],
@@ -71,51 +97,59 @@ def validate_classification(
         "message_evidence.reason",
     )
 
-    recommended_by = candidate.get("recommended_by")
-    if not isinstance(recommended_by, list):
-        raise RuntimeError("Classification recommended_by must be an array")
-    normalized_recommenders = []
-    seen_names = set()
-    for index, recommender in enumerate(recommended_by):
-        if not isinstance(recommender, dict):
-            raise RuntimeError(
-                f"Classification recommended_by[{index}] is invalid"
-            )
-        name = _required_text(
-            recommender.get("name"),
-            f"recommended_by[{index}].name",
-        )
-        quote = _optional_quote(
-            recommender.get("evidence_quote"),
-            note,
-            f"recommended_by[{index}].evidence_quote",
-        )
-        if name not in note or quote is None or name not in quote:
-            raise RuntimeError(
-                "Classification recommended_by must be fully grounded in CRM text"
-            )
-        normalized_name = name.casefold()
-        if normalized_name in seen_names:
-            raise RuntimeError("Classification recommended_by contains duplicates")
-        seen_names.add(normalized_name)
-        normalized_recommenders.append(
-            {
-                "name": name,
-                "evidence_quote": quote,
-            }
-        )
+    normalized_recommenders = _grounded_people(
+        candidate.get("recommended_by"), note, "recommended_by"
+    )
     candidate["recommended_by"] = normalized_recommenders
     if candidate.get("lead_type") != "referred" and normalized_recommenders:
         raise RuntimeError(
             "Classification recommended_by is only valid for referred leads"
         )
 
+    if "referral_relationship" not in candidate:
+        raise RuntimeError("Classification referral_relationship is missing")
+    relationship = candidate.get("referral_relationship")
+    if relationship is not None:
+        if candidate.get("lead_type") != "referred" or not isinstance(
+            relationship, dict
+        ):
+            raise RuntimeError("Classification referral_relationship is invalid")
+        current_role = relationship.get("current_contact_role")
+        if current_role not in {"recommender", "referred"}:
+            raise RuntimeError(
+                "Classification referral_relationship.current_contact_role is invalid"
+            )
+        related_contacts = _grounded_people(
+            relationship.get("related_contacts"),
+            note,
+            "referral_relationship.related_contacts",
+        )
+        if not related_contacts:
+            raise RuntimeError(
+                "Classification referral_relationship.related_contacts is empty"
+            )
+        if (
+            current_role == "referred"
+            and normalized_recommenders != related_contacts
+        ):
+            raise RuntimeError(
+                "Classification recommended_by must match referral relationship"
+            )
+        if current_role == "recommender" and normalized_recommenders:
+            raise RuntimeError(
+                "Classification recommender contact cannot have recommended_by"
+            )
+        candidate["referral_relationship"] = {
+            "current_contact_role": current_role,
+            "related_contacts": related_contacts,
+        }
+
     structured_demands = lead.get("product_demands")
     has_structured_demand = (
         isinstance(structured_demands, list) and bool(structured_demands)
     )
     has_grounded_text = bool(customer_quote and business_quote)
-    has_grounded_referral = bool(normalized_recommenders)
+    has_grounded_referral = bool(relationship)
     evidence_is_sufficient = (
         has_structured_demand or has_grounded_text or has_grounded_referral
     )

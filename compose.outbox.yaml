@@ -15,15 +15,6 @@ services:
       timeout: 3s
       retries: 5
 
-  outbox-reaper:
-    build:
-      context: .
-      dockerfile: Dockerfile.outbox
-    command: ["python", "-m", "app.reaper"]
-    env_file:
-      - ${OUTBOX_SERVICE_ENV_FILE:-config/outbox-docker.env}
-    restart: unless-stopped
-
   outbox-postgres:
     image: postgres:16-alpine
     profiles: ["standalone-db"]

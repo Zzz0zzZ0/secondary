@@ -84,21 +84,23 @@ For email:
 - Write a specific, concise subject.
 - Usually write 60–180 words.
 - Display the salesperson's name in Latin letters. Never place Chinese characters in the sender name or signature.
-- When `conversation_sender_identity.name` is supplied, it is an exact,
-  classification-validated name that this customer used to address the Aceler
-  salesperson. Use it as the sender name and signature. It overrides the sender
-  identity map, `sales.name`, and the supplied signature. It never changes
-  `contact.name` or the recipient greeting.
-- Otherwise check
+- First check
   [references/sender-identity-map.md](references/sender-identity-map.md).
   Normalize leading, trailing, and repeated whitespace, then require an exact
   CRM name match; never reorder names or use fuzzy matching. A mapped display
-  name overrides the fallback rules and any conflicting supplied signature.
+  name overrides `conversation_sender_identity`, the fallback rules, and any
+  conflicting supplied signature.
   Do not add transliteration or missing-English-name warnings for a matched
   identity. The mapped sender account is routing metadata and must never appear
   in the customer-facing message.
-- Only when neither `conversation_sender_identity.name` nor an exact sender
-  identity map match is available, choose the sender name in this order:
+- When no exact sender identity map match exists and
+  `conversation_sender_identity.name` is supplied, use that exact,
+  classification-validated customer-used name as the sender name and signature.
+  It overrides `sales.name` and the supplied signature, but never changes
+  `contact.name` or the recipient greeting.
+- Only when neither an exact sender identity map match nor
+  `conversation_sender_identity.name` is available, choose the sender name in
+  this order:
   1. Use the verified `sales.name_en` or `sales.english_name` when supplied.
   2. Use `sales.name` directly when it is already a verified Latin-script name.
   3. Otherwise transliterate a supplied Chinese `sales.name` into standard Hanyu Pinyin: use no tone marks or tone numbers, keep family-name-first order, separate the family name and given name with one space, join the syllables within a multi-syllable given name, and capitalize the first letter of each name component. Examples: `张小明` → `Zhang Xiaoming`; `欧阳娜娜` → `Ouyang Nana`.
@@ -144,9 +146,25 @@ Apply the CRM lead subtype:
 #### Referred contact
 
 - Use when CRM supplies `RECOMMEND`/`RECOMMENDED`/（被）推荐.
+- Preserve referral direction. If `referral_context.current_contact_role` is
+  supplied, treat it as authoritative. Otherwise use semantic judgment on
+  the grounded CRM relationship evidence supplied in the record: when the
+  current contact recommends a person named in that evidence, the current
+  contact is the recommender and the named person is referred; when the current
+  contact is described as having been recommended by a named person, the roles
+  are reversed. Never infer the direction from the category label alone.
 - If the current contact was referred and `recommended_by` or an equivalent verified relationship is supplied, open naturally with “referred/introduced by {name}”. Never invent the recommender, company, or relationship.
 - If the referral relationship is missing, omit the referral claim and add `REFERRAL_CONTEXT_MISSING`.
-- Do not treat the recommender as an ordinary product prospect. If the current contact is the recommender, ask for a reminder or forwarding only when that is the explicit message goal.
+- Do not treat the recommender as an ordinary product prospect. If the current
+  contact is the recommender, address that current contact and refer to the
+  person named in the note as the referred contact; ask for an introduction,
+  reminder, or forwarding only when supported by the CRM note and message goal.
+- The recipient and greeting always remain the current input `contact`. Never
+  greet or directly address a referred person through the current contact's
+  email address or LinkedIn URL. When the current contact is the recommender,
+  thank them for the recommendation or ask them to introduce, remind, copy, or
+  forward to the referred person; do not write as though a third party referred
+  the current contact.
 - Allow at most two unanswered outreach messages to the referred contact. After two unanswered attempts, return `no_message`; use `message_goal`/`reason` to indicate that the next internal action is to ask the recommender to remind or forward, not to send a third ordinary pitch.
 - Once the referred contact replies, respond to the reply and follow the CRM's updated subtype or inquiry state; do not reclassify it yourself.
 

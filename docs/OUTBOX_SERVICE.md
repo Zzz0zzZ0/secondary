@@ -31,13 +31,19 @@ Apply migrations first:
 ./bin/twenty-hermes migrate
 ```
 
+Before applying migration `005`, stop any legacy `send-once` or
+`start-outbox-reaper` process that is still running. Restart the Outbox API
+after the migration.
+
 Generate local API tokens once, then run:
 
 ```bash
 ./scripts/setup_outbox_service_config.sh
 ./bin/start-outbox-service
-./bin/start-outbox-reaper
 ```
+
+Expired leases are marked `unknown` lazily by claim and status requests; no
+separate reaper service is required.
 
 OpenAPI is available at `http://127.0.0.1:8010/docs`.
 

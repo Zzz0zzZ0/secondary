@@ -87,9 +87,14 @@ Input situation: The customer requested a catalog or company information but has
 
 ## Referred Contact
 
-Input situation: CRM marks the current contact as referred and supplies a verified recommender.
+Input situation: CRM marks the record as a referral and supplies a verified relationship direction.
 
-- Mention the recommender naturally in the opening.
+- If the current contact was referred, mention the recommender naturally in the opening.
+- If the current contact recommended another person, keep the current contact as
+  the recipient and identify the person named in the remark as the referred
+  contact. Greet and address only the current contact; never send a greeting for
+  the referred person through the current contact's channel. Do not reverse the
+  parties.
 - Never invent or infer the recommender from company research.
 - Send no more than two unanswered outreach messages to the referred contact.
 - After two unanswered attempts, return `no_message`; the next internal action is to ask the recommender to remind or forward.
@@ -130,9 +135,10 @@ not evidence of a customer request, response, or follow-up event.
 
 ## Chinese Salesperson Name
 
-Apply this section only when `conversation_sender_identity.name` is absent, no
-exact sender identity map entry matches, `sales.name` contains a Chinese name,
-and no verified English-form name is supplied. When
+Apply this section only when no exact sender identity map entry matches,
+`conversation_sender_identity.name` is absent, `sales.name` contains a Chinese
+name, and no verified English-form name is supplied. An exact sender identity
+map match is authoritative. Otherwise, when
 `conversation_sender_identity.name` is present, use that exact value as the
 sender name and signature; do not transliterate `sales.name`.
 

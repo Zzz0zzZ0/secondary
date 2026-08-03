@@ -76,6 +76,24 @@
         </section>
       </section>
 
+      <section class="runtime-report-panel" aria-labelledby="runtime-report-title">
+        <div class="dashboard-heading">
+          <div>
+            <p class="eyebrow dashboard-eyebrow">Daily operations report</p>
+            <h2 id="runtime-report-title">当日运行报告</h2>
+            <p id="runtime-report-status" class="muted">正在读取已归档报告…</p>
+          </div>
+          <div class="runtime-report-actions">
+            <select id="runtime-report-date" aria-label="报告日期" disabled></select>
+            <a id="runtime-report-json" class="button-link disabled" href="#">下载 JSON</a>
+            <a id="runtime-report-markdown" class="button-link disabled" href="#">下载 Markdown</a>
+            <button id="runtime-report-generate" type="button">生成当日报告</button>
+            <button id="runtime-report-refresh" type="button">刷新报告</button>
+          </div>
+        </div>
+        <pre id="runtime-report-content" class="runtime-report-content">暂无运行报告</pre>
+      </section>
+
       <section class="control-panel">
         <form id="run-form">
           <label>预览数量<input id="limit" type="number" min="1" max="20" value="5" required /></label>

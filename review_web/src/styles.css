@@ -36,6 +36,27 @@ main { width: min(1420px, calc(100% - 40px)); margin: 0 auto; padding: 32px 0 64
   border: 1px solid #dfe5df;
   border-radius: 16px;
 }
+.runtime-report-panel {
+  margin-top: 18px;
+  padding: 22px;
+  background: white;
+  border: 1px solid #dfe5df;
+  border-radius: 16px;
+}
+.runtime-report-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.runtime-report-actions select, .runtime-report-actions button, .button-link {
+  padding: 9px 12px;
+  border: 1px solid #176c5d;
+  border-radius: 9px;
+}
+.button-link { color: #176c5d; text-decoration: none; background: white; }
+.button-link.disabled { pointer-events: none; opacity: .45; }
+.runtime-report-content {
+  max-height: 520px;
+  margin-top: 16px;
+  overflow: auto;
+  border-left: 3px solid #176c5d;
+}
 .dashboard-heading, .dashboard-section-title {
   display: flex;
   align-items: center;
@@ -343,6 +364,7 @@ pre { margin: 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; 
 @media (max-width: 680px) {
   main { width: min(100% - 24px, 1420px); padding-top: 12px; }
   .hero, .control-panel, .dashboard-heading { flex-direction: column; align-items: stretch; }
+  .runtime-report-actions { align-items: stretch; }
   .hero-badges { justify-content: flex-start; }
   .polling-dashboard { padding: 16px; }
   .dashboard-stats, .process-flow, .recent-events, .scheduler-times { grid-template-columns: 1fr; }

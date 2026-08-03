@@ -1,9 +1,12 @@
+import json
 import os
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -16,10 +19,20 @@ from app.outbox import (
     save_message_edit,
 )
 from app.secondary_scheduler import SecondaryLeadScheduler
+from app.runtime_report import (
+    DEFAULT_REPORT_DIR,
+    build_report,
+    current_report_date,
+    list_reports,
+    write_report,
+)
 from .service import manager, regenerate_review_message
 
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "review_web" / "dist"
+RUNTIME_REPORT_DIR = Path(
+    os.getenv("HERMES_RUNTIME_REPORT_DIR", str(DEFAULT_REPORT_DIR))
+).resolve()
 app = FastAPI(title="Twenty → Hermes Review", docs_url="/api/docs")
 
 
@@ -140,6 +153,70 @@ def polling_dashboard(
 @app.get("/api/polling/runs")
 def polling_runs(limit: int = Query(default=20, ge=1, le=100)):
     return {"runs": _polling_store().runs(limit)}
+
+
+@app.get("/api/runtime-reports")
+def runtime_reports():
+    return {"records": list_reports(RUNTIME_REPORT_DIR)}
+
+
+@app.post("/api/runtime-reports/generate")
+def generate_runtime_report():
+    timezone_name = os.getenv("TWENTY_BUSINESS_TIMEZONE", "Asia/Shanghai")
+    now = datetime.now(timezone.utc)
+    report = build_report(
+        current_report_date(now, timezone_name),
+        timezone_name=timezone_name,
+        state_dir=Path(
+            os.getenv("HERMES_POLL_STATE_DIR", str(DEFAULT_STATE_DIR))
+        ),
+        now=now,
+        window_end=now,
+    )
+    write_report(report, RUNTIME_REPORT_DIR)
+    return {
+        "date": report["window"]["date"],
+        "generated_at": report["generated_at"],
+        "overall_status": report["overall_status"],
+        "complete": report["complete"],
+    }
+
+
+def _runtime_report_path(report_date: str, suffix: str) -> Path:
+    try:
+        date.fromisoformat(report_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="报告日期格式错误") from exc
+    path = RUNTIME_REPORT_DIR / f"{report_date}.{suffix}"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="运行报告不存在")
+    return path
+
+
+@app.get("/api/runtime-reports/{report_date}")
+def runtime_report_json(report_date: str, download: bool = False):
+    path = _runtime_report_path(report_date, "json")
+    if download:
+        return FileResponse(
+            path,
+            media_type="application/json",
+            filename=path.name,
+        )
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="运行报告 JSON 损坏") from exc
+
+
+@app.get("/api/runtime-reports/{report_date}/markdown")
+def runtime_report_markdown(report_date: str, download: bool = False):
+    path = _runtime_report_path(report_date, "md")
+    if download:
+        return FileResponse(path, media_type="text/markdown", filename=path.name)
+    return PlainTextResponse(
+        path.read_text(encoding="utf-8"),
+        media_type="text/markdown",
+    )
 
 
 @app.get("/api/polling/leads/{lead_id}")
