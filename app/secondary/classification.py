@@ -136,9 +136,7 @@ def validate_classification(
                 "Classification recommended_by must match referral relationship"
             )
         if current_role == "recommender" and normalized_recommenders:
-            raise RuntimeError(
-                "Classification recommender contact cannot have recommended_by"
-            )
+            candidate["recommended_by"] = []
         candidate["referral_relationship"] = {
             "current_contact_role": current_role,
             "related_contacts": related_contacts,
@@ -158,9 +156,7 @@ def validate_classification(
             "Classification sufficient message evidence is not grounded"
         )
     if status == "insufficient" and evidence_is_sufficient:
-        raise RuntimeError(
-            "Classification message evidence contradicts grounded fields"
-        )
+        assessment["status"] = "sufficient"
 
     permission = candidate.get("contact_permission")
     if not isinstance(permission, dict):

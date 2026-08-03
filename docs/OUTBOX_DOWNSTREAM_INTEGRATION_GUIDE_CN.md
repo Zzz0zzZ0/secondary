@@ -1,156 +1,60 @@
-# Outbox 下游接口检查
+# Outbox 下游消费者实现说明
 
-本文用于 Gmail、LinkedIn 等下游快速确认 Outbox API 是否可访问、鉴权是否正确，以及
-能否正常领取任务。下游不需要数据库权限。
+下游消费者只通过 HTTP API 对接，不需要访问 Hermes 源码、数据库或审核系统。
 
-## 1. 准备配置
+```text
+claim → 校验任务 → 按幂等键查重 → 调用发信平台 → complete / fail
+```
+
+## 配置
 
 ```dotenv
-OUTBOX_API_URL=http://<服务器地址>:8010
-OUTBOX_CONSUMER_TOKEN=<管理员分配的Token>
+OUTBOX_API_URL=https://<outbox-api>
+OUTBOX_CONSUMER_TOKEN=<管理员分配的单个 Token>
 OUTBOX_WORKER_ID=<稳定且唯一的消费者名称>
 ```
 
-| 下游 | channel | provider |
-|---|---|---|
-| Email（下游自选 Gmail API、SMTP、Graph 等实现） | `email` | `email` |
-| LinkedIn | `linkedin` | `linkedin` |
+- Email：`channels=["email"]`、`providers=["email"]`；
+- LinkedIn：`channels=["linkedin"]`、`providers=["linkedin"]`；
+- Token 只能保存在密钥管理或环境变量中，不能写入代码或日志。
 
-Token 不得写入源码或日志。生产环境应使用 HTTPS。
+## 领取任务
 
-## 2. 检查服务
+调用 `POST /v1/deliveries/claim`。空队列返回 `{ "items": [] }`，是正常结果。
+`claim` 会锁定任务；未实现结果回写前不得领取正式队列。
 
-```bash
-curl "$OUTBOX_API_URL/health"
-curl "$OUTBOX_API_URL/ready"
-```
+每个任务至少使用以下字段：
 
-预期：
-
-```json
-{"status":"ok","service":"outbox-api","version":"1.0.0"}
-{"status":"ready"}
-```
-
-- `/health` 失败：地址错误、网络不通或 API 未启动；
-- `/ready` 返回 `503`：Outbox 数据库不可用。
-
-OpenAPI 页面：
-
-```text
-http://<服务器地址>:8010/docs
-```
-
-## 3. 检查鉴权和领取接口
-
-将 `channels` 和 `providers` 换成上表中对应的值：
-
-```bash
-curl -X POST "$OUTBOX_API_URL/v1/deliveries/claim" \
-  -H "Authorization: Bearer $OUTBOX_CONSUMER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "worker_id": "gmail-worker-test-01",
-    "channels": ["email"],
-    "providers": ["email"],
-    "max_items": 1,
-    "wait_seconds": 0
-  }'
-```
-
-空队列正常返回：
-
-```json
-{"items":[]}
-```
-
-这表示网络、API、Token 和权限均正常。
-
-> `claim` 会真正领取并锁定任务，不是只读查询。仅在测试环境、已确认队列为空，或下游
-> 已经能够继续处理任务时执行。
-
-## 4. 有任务时检查
-
-响应中的任务应包含：
-
-```json
-{
-  "delivery_id": "任务ID",
-  "lease_token": "租约令牌",
-  "lease_expires_at": "租约到期时间",
-  "idempotency_key": "幂等键",
-  "channel": "email",
-  "provider": "email",
-  "recipient": "customer@example.com",
-  "sender_account_ref": "email:chloe@okgminerals.com",
-  "payload": {
-    "to": "customer@example.com",
-    "subject": "主题",
-    "body": "正文"
-  }
-}
-```
-
-必须确认：
-
-- `channel` 和 `provider` 与当前下游一致；
-- `recipient` 非空且格式有效；
-- Email 的 `sender_account_ref` 是 `email:<完整邮箱>`；缺少有效销售映射时
-  审核批准失败；LinkedIn 暂为 `null`；
-- `payload.to` 与 `recipient` 完全一致；
-- Email 的主题和正文非空；
-- LinkedIn 的正文非空、主题为空；
-- `delivery_id`、`lease_token`、`idempotency_key` 非空。
-
-`recipient` 是唯一发送目标，下游不得自行更换联系人或地址。
-
-## 5. 领取后的接口
-
-| 操作 | 接口 | 说明 |
-|---|---|---|
-| 续租 | `POST /v1/deliveries/{id}/heartbeat` | 处理时间接近租约期限 |
-| 成功 | `POST /v1/deliveries/{id}/complete` | 平台明确确认发送成功 |
-| 失败 | `POST /v1/deliveries/{id}/fail` | 回报失败结果 |
-
-这三个接口继续提交原 `worker_id` 和 `lease_token` 以保持接口兼容；服务端使用
-`delivery_id` 和 `lease_token` 判断当前租约所有权。
-
-失败结果：
-
-- `retryable`：明确未发送，可以重试；
-- `permanent`：明确无法发送，不应重试；
-- `unknown`：可能已发送但无法确认，禁止自动重试。
-
-## 6. 常见状态码
-
-| 状态码 | 含义 |
+| 字段 | 消费者要求 |
 |---|---|
-| `200` | 正常；`items: []` 表示暂无任务 |
-| `401` | Token 错误 |
-| `403` | Token 没有当前渠道权限 |
-| `409` | 租约过期、不匹配或属于其他 Worker |
-| `422` | 请求字段错误 |
-| `503` | 服务配置或数据库不可用 |
+| `delivery_id`、`lease_token` | 原样保存，用于后续回写与续租 |
+| `idempotency_key` | 持久化保存；同一键只允许实际发送一次 |
+| `channel`、`provider` | 必须与当前消费者匹配 |
+| `recipient`、`payload` | 唯一发送目标及内容；不得自行改写收件人 |
+| `sender_account_ref` | Email 为 `email:<完整邮箱>`，据此选择本地发信账号；LinkedIn 暂为 `null` |
 
-## 7. 通过标准
+Email 还必须校验 `payload.to == recipient`，且主题、正文均非空。LinkedIn 必须校验正文非空。
 
-- [ ] `/health` 返回 `ok`；
-- [ ] `/ready` 返回 `ready`；
-- [ ] claim 返回 `200`；
-- [ ] 空队列返回 `{"items":[]}`；
-- [ ] 有任务时 `recipient` 有效；
-- [ ] `payload.to` 与 `recipient` 一致；
-- [ ] 下游能够保存任务 ID、租约令牌和幂等键。
+## 结果回写
 
-## 8. 外部消费者实现
+所有回写都带原来的 `worker_id` 和 `lease_token`，并使用领取到的 `delivery_id`：
 
-外部同事不需要访问本项目代码。管理员提供 API 地址、单个 Consumer Token 和接口说明
-即可。同事可以在自己的项目中使用任意语言和任意邮件平台实现消费者。
+| 情况 | 接口 | 要求 |
+|---|---|---|
+| 处理接近租约到期 | `POST /v1/deliveries/{id}/heartbeat` | 先续租，再继续处理 |
+| 平台明确确认已发送 | `POST /v1/deliveries/{id}/complete` | 仅在确认成功后调用 |
+| 明确未发送 | `POST /v1/deliveries/{id}/fail` | `result` 为 `retryable` 或 `permanent` |
+| 可能已发送但无法确认 | `POST /v1/deliveries/{id}/fail` | `result=unknown`，禁止自动重试 |
 
-完整请求体、回写示例和不依赖本仓库的 Python HTTP 封装见
-`docs/OUTBOX_SENDER_QUICKSTART_CN.md`。服务运行时也可直接访问：
+平台消息 ID 可以随 `complete` 传入，但 Outbox 不保存它；消费者可自行留作排障记录。
 
-```text
-http://<服务器地址>:8010/docs
-http://<服务器地址>:8010/openapi.json
-```
+## 必须遵守的失败处理
+
+- 发送平台已接受、但消费者在 `complete` 前崩溃：按 `idempotency_key` 找到原发送结果，只回写 `complete`，不得再次发送；
+- 网络超时、断线等无法判断是否已发送：回写 `unknown`；
+- 租约过期或不匹配（`409`）：停止处理该任务，不能继续发送；
+- `401` / `403`：检查 Token 与渠道权限；`422`：检查请求字段；`503`：稍后重试服务连通性。
+
+服务检查：`GET /health`、`GET /ready`；在线接口定义：`/docs`、`/openapi.json`。
+完整 HTTP 请求体、curl 示例和无依赖 Python 封装见
+[OUTBOX_SENDER_QUICKSTART_CN.md](OUTBOX_SENDER_QUICKSTART_CN.md)。

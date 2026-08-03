@@ -1,9 +1,11 @@
 import copy
 import unittest
+from pathlib import Path
 
 from app.secondary.classification import validate_classification
 from app.secondary.message_policy import prepare_message_record
 from app.secondary.message_policy import validation_errors
+from app.secondary_scheduler import _needs_policy_reclassification
 
 
 class SecondaryReferralTest(unittest.TestCase):
@@ -59,6 +61,39 @@ class SecondaryReferralTest(unittest.TestCase):
         self.assertEqual(prepared["lead"]["referred_contacts"], "Florian Laux")
         self.assertNotIn("recommended_by", prepared["lead"])
 
+    def test_recommender_normalizes_legacy_recommended_by(self):
+        note = "Mario Vicari 告知同事 Lucchi 会负责跟进。"
+        candidate = self._candidate("recommender", "Lucchi", note)
+        candidate["recommended_by"] = copy.deepcopy(
+            candidate["referral_relationship"]["related_contacts"]
+        )
+
+        validated = validate_classification(
+            candidate, self._record("Mario Vicari", note)
+        )
+
+        self.assertEqual(validated["recommended_by"], [])
+
+    def test_policy_treats_colleague_handoff_as_referral(self):
+        policy = (
+            Path(__file__).resolve().parents[1]
+            / "skill"
+            / "classify-secondary-lead"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        note = "告知后续他的同事：Lucchi会负责跟进"
+        candidate = self._candidate("recommender", "Lucchi", note)
+
+        self.assertIn("后续由同事接手", policy)
+        validated = validate_classification(
+            candidate, self._record("Mario Vicari", note)
+        )
+
+        self.assertEqual(
+            validated["referral_relationship"]["current_contact_role"],
+            "recommender",
+        )
+
     def test_current_contact_can_be_referred(self):
         note = "Nathan 由 Sujal Khatiwada 推荐。"
         candidate = self._candidate("referred", "Sujal Khatiwada", note)
@@ -75,6 +110,17 @@ class SecondaryReferralTest(unittest.TestCase):
             "referred",
         )
         self.assertEqual(prepared["lead"]["recommended_by"], "Sujal Khatiwada")
+
+    def test_grounded_referral_normalizes_insufficient_message_evidence(self):
+        note = "Nathan 由 Sujal Khatiwada 推荐。"
+        candidate = self._candidate("referred", "Sujal Khatiwada", note)
+        candidate["message_evidence"]["status"] = "insufficient"
+
+        validated = validate_classification(
+            candidate, self._record("Nathan", note)
+        )
+
+        self.assertEqual(validated["message_evidence"]["status"], "sufficient")
 
     def test_legacy_self_recommender_is_not_treated_as_recommended_by(self):
         note = "推荐采购经理 Florian Laux。"
@@ -119,6 +165,62 @@ class SecondaryReferralTest(unittest.TestCase):
         }
 
         self.assertEqual(validation_errors(candidate, crm_input, "lead-1"), [])
+
+    def test_message_reason_must_be_simplified_chinese(self):
+        crm_input = {
+            "lead": {"id": "lead-1"},
+            "output": {"type": "email"},
+            "sales": {"name": "倩文 于"},
+        }
+        candidate = {
+            "decision": "generated",
+            "lead_id": "lead-1",
+            "output_type": "email",
+            "content": {
+                "subject": "Subject",
+                "subject_zh": "主题",
+                "body": "Hello,\n\nBest regards,\nChloe\nAceler International",
+                "body_zh": "您好，\n\n此致，\nChloe\nAceler International",
+            },
+            "message_goal": "跟进",
+            "information_requested": [],
+            "warnings": [],
+            "reason": "UNKNOWN_DEMAND subtype; asking one qualification question.",
+            "review_required": True,
+        }
+
+        self.assertIn(
+            "判断理由必须使用简体中文",
+            validation_errors(candidate, crm_input, "lead-1"),
+        )
+
+    def test_v6_reclassifies_unknown_recommend_records_only(self):
+        class Row(dict):
+            def __getitem__(self, key):
+                return super().__getitem__(key)
+
+        referral = Row(
+            policy_version="secondary-lead-v5",
+            lead_type="unknown_demand",
+            crm_snapshot_json='{"lead":{"raw_type":["RECOMMEND"]}}',
+        )
+        unrelated = Row(
+            policy_version="secondary-lead-v5",
+            lead_type="unknown_demand",
+            crm_snapshot_json='{"lead":{"raw_type":["UNKNOWN_DEMAND"]}}',
+        )
+
+        self.assertTrue(_needs_policy_reclassification(referral))
+        self.assertFalse(_needs_policy_reclassification(unrelated))
+        self.assertTrue(
+            _needs_policy_reclassification(
+                Row(
+                    policy_version=None,
+                    lead_type="unknown_demand",
+                    crm_snapshot_json="{}",
+                )
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -13,6 +13,10 @@ COMPANY_CONTEXT_WARNINGS = {
 }
 
 
+def _contains_simplified_chinese(value: str) -> bool:
+    return any("\u4e00" <= character <= "\u9fff" for character in value)
+
+
 def _mapped_sender_name(record: Dict[str, Any]) -> Optional[str]:
     sales_name = (record.get("sales") or {}).get("name")
     identity = resolve_sender_identity(sales_name)
@@ -209,8 +213,11 @@ def validation_errors(
         not isinstance(item, str) for item in candidate_warnings or []
     ):
         errors.append("内部提醒必须为数组")
-    if not isinstance(candidate.get("reason"), str) or not candidate.get("reason"):
+    reason = candidate.get("reason")
+    if not isinstance(reason, str) or not reason:
         errors.append("缺少判断理由")
+    elif not _contains_simplified_chinese(reason):
+        errors.append("判断理由必须使用简体中文")
     if candidate.get("review_required") is not True:
         errors.append("review_required未明确设为true")
     input_warnings = (

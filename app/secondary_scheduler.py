@@ -48,7 +48,28 @@ DEFAULT_CLASSIFICATION_SKILL_DIR = (
 )
 DEFAULT_EXPORT_SCRIPT = PROJECT_DIR / "scripts" / "twenty_export_hermes_inputs.sh"
 DEFAULT_DB_CHECK_SCRIPT = PROJECT_DIR / "scripts" / "twenty_db_check.sh"
-CLASSIFICATION_POLICY_VERSION = "secondary-lead-v5"
+CLASSIFICATION_POLICY_VERSION = "secondary-lead-v6"
+
+
+def _needs_policy_reclassification(row: sqlite3.Row) -> bool:
+    if row["policy_version"] == CLASSIFICATION_POLICY_VERSION:
+        return False
+    if row["policy_version"] is None:
+        return True
+    if CLASSIFICATION_POLICY_VERSION != "secondary-lead-v6":
+        return True
+    if row["lead_type"] != "unknown_demand":
+        return False
+    try:
+        raw_types = (json.loads(row["crm_snapshot_json"]).get("lead") or {}).get(
+            "raw_type"
+        )
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(raw_types, list) and any(
+        str(raw_type).upper() in {"RECOMMEND", "RECOMMENDED"}
+        for raw_type in raw_types
+    )
 
 
 def _canonical_json(value: Any) -> str:
@@ -503,21 +524,20 @@ class SecondaryLeadScheduler:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
-                SELECT lead_id
+                SELECT lead_id, lead_type, policy_version, crm_snapshot_json
                 FROM secondary_lead_state
                 WHERE status IN ('scheduled', 'needs_review', 'paused')
                   AND last_classified_at IS NOT NULL
                   AND last_generated_at IS NULL
                   AND latest_message_version_id IS NULL
-                  AND (
-                    policy_version IS NULL
-                    OR policy_version != ?
-                  )
+                  AND (policy_version IS NULL OR policy_version != ?)
                 ORDER BY last_classified_at, lead_id
                 """,
                 (CLASSIFICATION_POLICY_VERSION,),
             ).fetchall()
             for row in rows:
+                if not _needs_policy_reclassification(row):
+                    continue
                 cursor = connection.execute(
                     """
                     UPDATE secondary_lead_state
