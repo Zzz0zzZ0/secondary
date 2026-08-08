@@ -87,8 +87,8 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/claim" \
 {
   "delivery_id": "任务ID",
   "message_version_id": "消息版本ID",
-  "lease_token": "本次租约令牌",
-  "lease_expires_at": "租约到期时间",
+  "lease_token": "兼容字段",
+  "lease_expires_at": null,
   "schema_version": 1,
   "idempotency_key": "幂等键",
   "channel": "email",
@@ -116,7 +116,7 @@ Email 消费者至少检查：
 - `sender_account_ref` 是 `email:<完整邮箱>`，并映射到本地已配置账号；
 - `payload.to` 与 `recipient` 完全一致；
 - `payload.subject` 和 `payload.body` 非空；
-- `delivery_id`、`lease_token`、`idempotency_key` 非空。
+- `delivery_id`、`idempotency_key` 非空；`lease_token` 仅保留为兼容字段。
 
 LinkedIn 消费者至少检查：
 
@@ -127,10 +127,10 @@ LinkedIn 消费者至少检查：
 
 ## 6. 发信结果回写
 
-任务领取后，后续请求继续提交原来的 `worker_id`、`delivery_id` 和 `lease_token`，
-以保持接口兼容；服务端使用 `delivery_id` 和 `lease_token` 判断当前租约所有权。
+任务领取后，后续请求只提交 `worker_id`；`delivery_id` 已在 URL 中。服务端只检查任务仍处于
+`sending`，没有租约到期或续租机制。
 
-### 处理时间较长：续租
+### 心跳兼容接口（无需调用）
 
 ```bash
 curl -X POST "$OUTBOX_API_URL/v1/deliveries/$DELIVERY_ID/heartbeat" \
@@ -142,7 +142,7 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/$DELIVERY_ID/heartbeat" \
   }"
 ```
 
-默认租约为 300 秒。处理可能超过租约时，应提前续租。
+该接口保留给旧消费者，但不会改变任务状态或处理时限。
 
 ### 平台明确确认发送成功
 
@@ -151,10 +151,7 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/$DELIVERY_ID/complete" \
   -H "Authorization: Bearer $OUTBOX_CONSUMER_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
-    \"worker_id\": \"$OUTBOX_WORKER_ID\",
-    \"lease_token\": \"$LEASE_TOKEN\",
-    \"provider_message_id\": \"平台返回的消息ID\",
-    \"provider_thread_id\": \"平台返回的会话ID\"
+    \"worker_id\": \"$OUTBOX_WORKER_ID\"
   }"
 ```
 
@@ -168,11 +165,7 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/$DELIVERY_ID/fail" \
   -H "Authorization: Bearer $OUTBOX_CONSUMER_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
-    \"worker_id\": \"$OUTBOX_WORKER_ID\",
-    \"lease_token\": \"$LEASE_TOKEN\",
-    \"result\": \"retryable\",
-    \"error_code\": \"provider_rate_limited\",
-    \"error_message\": \"平台明确拒绝且未发送\"
+    \"worker_id\": \"$OUTBOX_WORKER_ID\"
   }"
 ```
 
@@ -285,6 +278,6 @@ claim → 校验任务 → 按 idempotency_key 查重 → 调用发信平台
 |---|---|
 | `401` | Token 缺失或错误，联系管理员重新确认 |
 | `403` | Token 没有该 channel/provider 权限 |
-| `409` | 租约过期、Worker 不匹配或任务已被其他消费者处理 |
+| `409` | 任务已不处于 `sending`，不能再回写 |
 | `422` | 请求字段格式错误 |
 | `503` | Outbox 服务鉴权未配置或数据库不可用 |

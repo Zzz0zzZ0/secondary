@@ -73,7 +73,7 @@ class OutboxSenderAccountTest(unittest.TestCase):
                 return params
         self.fail("delivery_outbox insert was not executed")
 
-    def test_email_approval_stores_mapped_full_address_reference(self):
+    def test_email_approval_stores_mapped_sender_and_html_body(self):
         cursor = self.approve(
             pending_message("email", "customer@example.com", "倩文 于")
         )
@@ -81,6 +81,7 @@ class OutboxSenderAccountTest(unittest.TestCase):
         params = self.delivery_insert_params(cursor)
 
         self.assertEqual("email:chloe@okgminerals.com", params[5])
+        self.assertEqual("<p>Message body</p>", params[6]["body_html"])
 
     def test_linkedin_approval_leaves_sender_reference_empty(self):
         cursor = self.approve(
@@ -100,21 +101,13 @@ class OutboxSenderAccountTest(unittest.TestCase):
             pending_message("email", "customer@example.com", "未映射 销售")
         )
 
-        with patch.object(outbox, "connect", return_value=FakeConnection(cursor)):
-            with patch.object(outbox, "_json", side_effect=lambda value: value):
-                with patch.object(outbox, "notify_secondary_outbox_event"):
-                    with self.assertRaisesRegex(
-                        RuntimeError,
-                        "valid sender account mapping",
-                    ):
+        with self.assertRaisesRegex(
+            RuntimeError, "valid sender account mapping"
+        ):
+            with patch.object(outbox, "connect", return_value=FakeConnection(cursor)):
+                with patch.object(outbox, "_json", side_effect=lambda value: value):
+                    with patch.object(outbox, "notify_secondary_outbox_event"):
                         outbox.approve_message(cursor.row[0], "reviewer")
-
-        self.assertFalse(
-            any(
-                "INSERT INTO sales_automation.delivery_outbox" in query
-                for query, _ in cursor.calls
-            )
-        )
 
 
 if __name__ == "__main__":

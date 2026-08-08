@@ -160,35 +160,14 @@ ${RECORD_JSON}"
 
   printf '  [%s/%s] %s\n' "$RECORD_NUMBER" "$RECORD_COUNT" "$RECORD_ID"
 
-  if jq -e '.message_generation_eligibility.allowed == false' "$INPUT_PATH" >/dev/null; then
-    jq -n \
-      --arg lead_id "$RECORD_ID" \
-      --arg output_type "$(jq -r '.output.type' "$INPUT_PATH")" \
-      --slurpfile input "$INPUT_PATH" \
-      '{
-        decision:"cannot_generate",
-        lead_id:$lead_id,
-        output_type:$output_type,
-        language:"English",
-        content:{subject:null, subject_zh:null, body:null, body_zh:null},
-        message_goal:null,
-        information_requested:["补充最后跟进时间，以及可识别的客户行为和业务细节"],
-        warnings:($input[0].warnings // []),
-        reason:"缺少可靠跟进时间，且CRM内文本没有可核验的客户行为和业务细节",
-        review_required:true
-      }' >"$RAW_PATH"
-    jq -n '{input_tokens:0, output_tokens:0, total_tokens:0, skipped:true}' >"$USAGE_PATH"
-    HERMES_EXIT_CODE=0
-  else
-    set +e
-    "$HERMES_COMMAND" \
-      --toolsets clarify \
-      --usage-file "$USAGE_PATH" \
-      --oneshot "$PROMPT_TEXT" \
-      >"$RAW_PATH"
-    HERMES_EXIT_CODE="$?"
-    set -e
-  fi
+  set +e
+  "$HERMES_COMMAND" \
+    --toolsets clarify \
+    --usage-file "$USAGE_PATH" \
+    --oneshot "$PROMPT_TEXT" \
+    >"$RAW_PATH"
+  HERMES_EXIT_CODE="$?"
+  set -e
 
   CANDIDATE_VALID=false
   if (

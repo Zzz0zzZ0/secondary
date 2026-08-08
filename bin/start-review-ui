@@ -40,7 +40,10 @@ if ! (cd "$PROJECT_DIR" && "$PYTHON_BIN" -c 'from app.outbox import preflight; p
   exit 2
 fi
 if [[ ! -f "$WEB_DIR/dist/index.html" ]] \
-  || [[ "${REVIEW_UI_REBUILD:-false}" == "true" ]]; then
+  || [[ "${REVIEW_UI_REBUILD:-false}" == "true" ]] \
+  || [[ "$WEB_DIR/index.html" -nt "$WEB_DIR/dist/index.html" ]] \
+  || [[ "$WEB_DIR/src/main.ts" -nt "$WEB_DIR/dist/index.html" ]] \
+  || [[ "$WEB_DIR/src/styles.css" -nt "$WEB_DIR/dist/index.html" ]]; then
   if [[ ! -d "$WEB_DIR/node_modules" ]]; then
     (cd "$WEB_DIR" && npm ci)
   fi

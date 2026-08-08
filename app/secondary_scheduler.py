@@ -30,7 +30,10 @@ from .secondary.domain import (
     SHORT_CYCLE_TYPES,
     interval_days,
 )
-from .secondary.message_policy import prepare_message_record
+from .secondary.message_policy import (
+    MANUAL_CONFIRMATION_WARNING,
+    prepare_message_record,
+)
 from .secondary.schema import initialize_schema
 from .message_jobs import (
     DEFAULT_PIPELINE_SCRIPT,
@@ -1321,40 +1324,6 @@ class SecondaryLeadScheduler:
             ).fetchone()
 
         message_input = self._message_input(row)
-        eligibility = message_input["message_generation_eligibility"]
-        if not eligibility["allowed"]:
-            now_text = isoformat(self.now())
-            reason = "缺少可靠跟进时间，且CRM内文本没有可核验的客户行为和业务细节"
-            with self._connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                connection.execute(
-                    """
-                    UPDATE secondary_lead_state
-                    SET status = 'paused',
-                        next_action_at = NULL,
-                        latest_message_version_id = NULL,
-                        last_error = ?,
-                        updated_at = ?
-                    WHERE lead_id = ?
-                    """,
-                    (reason, now_text, lead_id),
-                )
-                self._event(
-                    connection,
-                    lead_id,
-                    "message_generation_blocked",
-                    {
-                        "reason": reason,
-                        "reason_codes": eligibility["reason_codes"],
-                    },
-                )
-            return {
-                "lead_id": lead_id,
-                "status": "paused",
-                "decision": "cannot_generate",
-                "reason": reason,
-                "generation_skipped": True,
-            }
         job_id = self._enqueue_message(row, message_input)
         process_result = self.message_processor.process_job(job_id)
         analysis = self._analysis_result(job_id)
@@ -1393,6 +1362,9 @@ class SecondaryLeadScheduler:
 
         output = json.loads(analysis["result_json"])
         decision = analysis["decision"]
+        manual_confirmation_required = (
+            MANUAL_CONFIRMATION_WARNING in (output.get("warnings") or [])
+        )
         now_text = isoformat(self.now())
         if decision == "generated":
             channel = analysis["output_type"]
@@ -1470,6 +1442,7 @@ class SecondaryLeadScheduler:
             decision == "generated"
             and message_version_id is not None
             and not self.human_review_enabled
+            and not manual_confirmation_required
         ):
             try:
                 self._auto_approve_message(
@@ -1570,6 +1543,15 @@ class SecondaryLeadScheduler:
             ).fetchall()
         for row in message_rows:
             try:
+                message = get_message(row["latest_message_version_id"])
+                original_output = message[4] if message is not None else {}
+                warnings = (
+                    original_output.get("warnings")
+                    if isinstance(original_output, dict)
+                    else []
+                )
+                if MANUAL_CONFIRMATION_WARNING in warnings:
+                    continue
                 self._auto_approve_message(
                     row["latest_message_version_id"],
                     "Review backlog released after human review was disabled",
@@ -1701,6 +1683,8 @@ class SecondaryLeadScheduler:
                 SET status = ?,
                     next_action_at = ?,
                     follow_up_count = ?,
+                    latest_message_version_id = CASE WHEN ? THEN NULL ELSE latest_message_version_id END,
+                    last_generated_at = CASE WHEN ? THEN NULL ELSE last_generated_at END,
                     last_error = NULL,
                     updated_at = ?
                 WHERE lead_id = ?
@@ -1709,6 +1693,8 @@ class SecondaryLeadScheduler:
                     status,
                     next_action_at,
                     follow_up_count,
+                    event == "rejected",
+                    event == "rejected",
                     isoformat(occurred),
                     row["lead_id"],
                 ),

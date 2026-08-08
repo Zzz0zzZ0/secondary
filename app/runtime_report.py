@@ -372,14 +372,12 @@ def _overall_status(scheduler: Dict[str, Any], outbox: Dict[str, Any]) -> str:
     if scheduler.get("status") != "ok" or outbox.get("status") != "ok":
         return "异常"
     if (
-        scheduler.get("runs", {}).get("failed", 0)
-        or scheduler.get("runtime", {}).get("runtime_mode") == "local_only"
-        or outbox.get("attempt_statuses", {}).get("failed", 0)
-        or outbox.get("attempt_statuses", {}).get("unknown", 0)
+        scheduler.get("runtime", {}).get("runtime_mode") == "local_only"
+        or scheduler.get("backlog_at_snapshot", {}).get("failed", 0)
         or outbox.get("outbox_backlog_at_snapshot", {}).get("failed", 0)
         or outbox.get("outbox_backlog_at_snapshot", {}).get("unknown", 0)
     ):
-        return "异常"
+        return "有风险"
     if (
         scheduler.get("aged_waiting_review_over_24h", 0)
         or outbox.get("aged_pending_review_over_24h", 0)
@@ -510,9 +508,9 @@ def render_markdown(report: Dict[str, Any]) -> str:
     else:
         lines.append("数据源不完整，当前积压不可判定。")
     errors = (scheduler.get("errors") or []) + (outbox.get("errors") or [])
-    lines.extend(["", "## 异常明细", ""])
+    lines.extend(["", "## 需关注记录", ""])
     if not errors:
-        lines.append("本报告窗口内没有异常明细。")
+        lines.append("本报告窗口内没有需关注记录。")
     else:
         lines.extend(["| 最近时间 | 阶段 | 次数 | 线索 | 销售人员 | 错误 |", "| --- | --- | ---: | --- | --- | --- |"])
         for item in errors[:20]:

@@ -22,7 +22,6 @@ umask 077
   printf 'OUTBOX_CONSUMER_TOKENS_JSON='\''{"%s":["email:email"],"%s":["linkedin:linkedin"]}'\''\n' \
     "$EMAIL_TOKEN" "$LINKEDIN_TOKEN"
   printf 'OUTBOX_PRODUCER_TOKEN=%s\n' "$PRODUCER_TOKEN"
-  printf 'OUTBOX_LEASE_SECONDS=300\n'
   printf 'OUTBOX_CONTACT_COOLDOWN_HOURS=24\n'
   printf 'OUTBOX_API_HOST=0.0.0.0\n'
   printf 'OUTBOX_API_PORT=8010\n'

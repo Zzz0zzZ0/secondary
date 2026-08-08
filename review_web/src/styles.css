@@ -231,6 +231,8 @@ main { width: min(1420px, calc(100% - 40px)); margin: 0 auto; padding: 32px 0 64
 }
 form { display: flex; align-items: end; gap: 12px; }
 label { display: grid; gap: 6px; color: #5d6965; font-size: 12px; font-weight: 650; }
+label.filter { display: inline-grid; gap: 4px; min-width: 120px; }
+label.filter select { padding: 8px 10px; font-size: 13px; background: #ffffff; border: 1px solid #d7dfda; border-radius: 8px; color: #17211f; }
 .channel-rule { display: grid; gap: 6px; min-width: 145px; color: #5d6965; font-size: 12px; }
 .channel-rule strong { padding: 10px 12px; color: #17211f; background: #f1f5f2; border: 1px solid #d7dfda; border-radius: 9px; }
 input, select, textarea { min-width: 120px; padding: 10px 12px; color: #17211f; background: #f8faf8; border: 1px solid #ccd6d0; border-radius: 9px; outline: none; }

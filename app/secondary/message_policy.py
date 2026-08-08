@@ -4,9 +4,7 @@ from typing import Any, Dict, List, Optional
 from .sender_identity import resolve_sender_identity
 
 
-GENERATION_BLOCK_WARNING = (
-    "MESSAGE_GENERATION_BLOCKED_INSUFFICIENT_CRM_EVIDENCE"
-)
+MANUAL_CONFIRMATION_WARNING = "CRM_EVIDENCE_REQUIRES_MANUAL_CONFIRMATION"
 COMPANY_CONTEXT_WARNINGS = {
     "COMPANY_CONTEXT_MISSING",
     "COMPANY_CONTEXT_THIN",
@@ -42,17 +40,17 @@ def generation_eligibility(
         isinstance(assessment, dict)
         and assessment.get("status") == "sufficient"
     )
-    allowed = has_reliable_follow_up or has_explicit_crm_evidence
     reason_codes: List[str] = []
     if not has_reliable_follow_up:
         reason_codes.append("FOLLOW_UP_TIME_MISSING")
     if not has_explicit_crm_evidence:
         reason_codes.append("CRM_EVIDENCE_INSUFFICIENT")
     return {
-        "allowed": allowed,
+        "allowed": True,
         "timing_reliable": has_reliable_follow_up,
         "explicit_crm_evidence": has_explicit_crm_evidence,
-        "reason_codes": [] if allowed else reason_codes,
+        "requires_manual_confirmation": bool(reason_codes),
+        "reason_codes": reason_codes,
     }
 
 
@@ -141,10 +139,10 @@ def prepare_message_record(
 
     eligibility = generation_eligibility(source_record, classification)
     record["message_generation_eligibility"] = eligibility
-    if not eligibility["allowed"]:
+    if eligibility["requires_manual_confirmation"]:
         warnings = record.setdefault("warnings", [])
-        if GENERATION_BLOCK_WARNING not in warnings:
-            warnings.append(GENERATION_BLOCK_WARNING)
+        if MANUAL_CONFIRMATION_WARNING not in warnings:
+            warnings.append(MANUAL_CONFIRMATION_WARNING)
     return record
 
 
@@ -168,6 +166,7 @@ def normalize_candidate(
         warning
         for warning in input_warnings
         if warning in COMPANY_CONTEXT_WARNINGS
+        or warning == MANUAL_CONFIRMATION_WARNING
     )
     normalized["warnings"] = sorted(set(retained))
     return normalized
@@ -231,14 +230,6 @@ def validation_errors(
         or permission.get("status") == "do_not_contact"
     ) and decision != "no_message":
         errors.append("CRM禁止联系时只能返回no_message")
-    eligibility = crm_input.get("message_generation_eligibility") or {}
-    if eligibility.get("allowed") is False and decision != "cannot_generate":
-        errors.append(
-            "CRM信息不足，系统禁止生成客户消息"
-            if decision == "generated"
-            else "CRM信息不足时只能返回cannot_generate"
-        )
-
     if decision == "generated":
         if not isinstance(content.get("body"), str) or not content.get("body"):
             errors.append("客户正文为空")
@@ -263,23 +254,6 @@ def validation_errors(
             or content.get("subject_zh") is not None
         ):
             errors.append("LinkedIn消息不应包含主题")
-        sender_identity = crm_input.get("conversation_sender_identity") or {}
-        sender_name = _mapped_sender_name(crm_input) or sender_identity.get("name")
-        if output_type == "email" and isinstance(sender_name, str):
-            for field, label in (
-                ("body", "客户正文"),
-                ("body_zh", "中文正文对照"),
-            ):
-                body = content.get(field)
-                lines = (
-                    [line.strip() for line in body.splitlines() if line.strip()]
-                    if isinstance(body, str)
-                    else []
-                )
-                if sender_name not in lines[-4:]:
-                    errors.append(
-                        f"{label}未使用客户确认过的发件人称呼"
-                    )
     elif any(
         content.get(key) is not None
         for key in ("subject", "subject_zh", "body", "body_zh")
@@ -301,4 +275,21 @@ def validation_errors(
             errors.append(f"Hermes自行添加了“{label}”标记")
         elif expected and not actual:
             errors.append(f"Hermes遗漏了CRM提供的“{label}”标记")
+    sender_identity = crm_input.get("conversation_sender_identity") or {}
+    sender_name = _mapped_sender_name(crm_input) or sender_identity.get("name")
+    if decision == "generated" and output_type == "email" and isinstance(sender_name, str):
+        for field, label in (("body", "客户正文"), ("body_zh", "中文正文对照")):
+            body = content.get(field)
+            lines = (
+                [line.strip() for line in body.splitlines() if line.strip()]
+                if isinstance(body, str)
+                else []
+            )
+            if sender_name not in lines[-4:]:
+                errors.append(f"{label}未使用客户确认过的发件人称呼")
+    if (
+        MANUAL_CONFIRMATION_WARNING in input_warnings
+        and MANUAL_CONFIRMATION_WARNING not in warnings
+    ):
+        errors.append("CRM证据不足时必须标记为需要人工确认")
     return errors

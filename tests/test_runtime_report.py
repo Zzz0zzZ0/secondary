@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app.runtime_report import (
+    _overall_status,
     build_report,
     current_report_date,
     report_window,
@@ -90,6 +91,31 @@ class RuntimeReportTests(unittest.TestCase):
             self.assertTrue(paths["markdown"].is_file())
             self.assertIn("数据完整：否", paths["markdown"].read_text())
             self.assertEqual(paths["json"].stat().st_mode & 0o777, 0o600)
+
+    def test_recovered_runs_do_not_make_system_overall_abnormal(self):
+        scheduler = {
+            "status": "ok",
+            "runs": {"completed": 90, "failed": 2},
+            "runtime": {"runtime_mode": "online"},
+            "backlog_at_snapshot": {"failed": 0},
+            "errors": [
+                {
+                    "stage": "scheduler_run",
+                    "error": "Recovered after scheduler restart",
+                },
+                {
+                    "stage": "secondary_lead",
+                    "error": "CRM contains DO_NOT_CONTACT",
+                },
+            ],
+        }
+        outbox = {
+            "status": "ok",
+            "attempt_statuses": {},
+            "outbox_backlog_at_snapshot": {},
+        }
+
+        self.assertEqual(_overall_status(scheduler, outbox), "正常")
 
 
 if __name__ == "__main__":

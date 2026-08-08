@@ -13,7 +13,7 @@ from app.delivery_service import (
     complete_delivery,
     fail_delivery,
     queue_status,
-    renew_delivery_lease,
+    heartbeat_delivery,
 )
 from app.outbox import approve_message
 from .auth import consumer_scopes, require_consumer_scope, require_producer_token
@@ -38,18 +38,15 @@ class ClaimRequest(BaseModel):
 
 class LeaseRequest(BaseModel):
     worker_id: str = Field(min_length=1, max_length=128)
-    lease_token: str = Field(min_length=20, max_length=256)
+    lease_token: Optional[str] = Field(default=None, max_length=256)
 
 
-class CompleteRequest(LeaseRequest):
-    provider_message_id: Optional[str] = Field(default=None, max_length=512)
-    provider_thread_id: Optional[str] = Field(default=None, max_length=512)
+class CompleteRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=128)
 
 
-class FailRequest(LeaseRequest):
-    result: Literal["retryable", "permanent", "unknown"]
-    error_code: str = Field(min_length=1, max_length=128)
-    error_message: str = Field(default="", max_length=2000)
+class FailRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=128)
 
 
 class ApproveRequest(BaseModel):
@@ -111,15 +108,15 @@ async def heartbeat(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_credentials),
 ):
     consumer_scopes(credentials)
-    expires_at = await run_in_threadpool(
-        renew_delivery_lease,
+    active = await run_in_threadpool(
+        heartbeat_delivery,
         delivery_id,
         request.worker_id,
         request.lease_token,
     )
-    if expires_at is None:
-        raise HTTPException(status_code=409, detail="Lease is missing, expired, or owned by another worker")
-    return {"delivery_id": str(delivery_id), "lease_expires_at": expires_at}
+    if not active:
+        raise HTTPException(status_code=409, detail="Delivery is no longer sending")
+    return {"delivery_id": str(delivery_id), "lease_expires_at": None}
 
 
 @app.post("/v1/deliveries/{delivery_id}/complete")
@@ -133,12 +130,9 @@ async def complete(
         complete_delivery,
         delivery_id,
         request.worker_id,
-        request.lease_token,
-        request.provider_message_id,
-        request.provider_thread_id,
     )
     if result is None:
-        raise HTTPException(status_code=409, detail="Lease is missing, expired, or owned by another worker")
+        raise HTTPException(status_code=409, detail="Delivery is no longer sending")
     return {"delivery_id": str(delivery_id), **result}
 
 
@@ -153,13 +147,9 @@ async def fail(
         fail_delivery,
         delivery_id,
         request.worker_id,
-        request.lease_token,
-        request.result,
-        request.error_code,
-        request.error_message,
     )
     if result is None:
-        raise HTTPException(status_code=409, detail="Lease is missing, expired, or owned by another worker")
+        raise HTTPException(status_code=409, detail="Delivery is no longer sending")
     return {"delivery_id": str(delivery_id), **result}
 
 

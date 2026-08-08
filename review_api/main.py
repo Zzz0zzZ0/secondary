@@ -14,6 +14,7 @@ from app.message_jobs import DEFAULT_STATE_DIR
 from app.outbox import (
     approve_message,
     get_review_message,
+    list_outbox_deliveries,
     list_review_messages,
     reject_message,
     save_message_edit,
@@ -273,6 +274,14 @@ def review_messages(
         return {
             "records": list_review_messages(limit, status),
         }
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/api/outbox/deliveries")
+def outbox_deliveries(limit: int = Query(default=100, ge=1, le=500)):
+    try:
+        return {"records": list_outbox_deliveries(limit)}
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

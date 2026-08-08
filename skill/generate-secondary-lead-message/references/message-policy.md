@@ -123,15 +123,16 @@ The data-integration layer determines company-research status. Do not infer or c
 - Never add, remove, or replace either company-context code.
 - Do not guess the customer's industry, products, location, or purchasing role.
 
-## CRM Evidence Gate
+## CRM Evidence Review Flag
 
-When `message_generation_eligibility.allowed` is `false`, return
-`cannot_generate` with all subject and body fields set to `null`. Preserve
-`MESSAGE_GENERATION_BLOCKED_INSUFFICIENT_CRM_EVIDENCE`.
+When `message_generation_eligibility.requires_manual_confirmation` is `true`,
+return a safe `generated` draft when one can be written and preserve
+`CRM_EVIDENCE_REQUIRES_MANUAL_CONFIRMATION`. The integration routes it to
+mandatory human review even if automatic review is otherwise enabled.
 
-This is a deterministic integration decision. Do not override it with company
-research or a generic introduction. A product or industry keyword by itself is
-not evidence of a customer request, response, or follow-up event.
+Do not turn company research or a product/industry keyword into a claimed
+customer requirement. Use a conservative clarification or holding message when
+the CRM does not support a specific follow-up.
 
 ## Chinese Salesperson Name
 

@@ -2,7 +2,7 @@ export type Delivery = {
   delivery_id: string;
   message_version_id: string;
   lease_token: string;
-  lease_expires_at: string;
+  lease_expires_at: string | null;
   schema_version: "1.0";
   idempotency_key: string;
   channel: "email" | "linkedin";
@@ -61,30 +61,18 @@ export class OutboxClient {
   complete(
     item: Delivery,
     workerId: string,
-    providerMessageId?: string,
-    providerThreadId?: string,
   ) {
     return this.post(`/v1/deliveries/${item.delivery_id}/complete`, {
       worker_id: workerId,
-      lease_token: item.lease_token,
-      provider_message_id: providerMessageId,
-      provider_thread_id: providerThreadId,
     });
   }
 
   fail(
     item: Delivery,
     workerId: string,
-    result: "retryable" | "permanent" | "unknown",
-    errorCode: string,
-    errorMessage = "",
   ) {
     return this.post(`/v1/deliveries/${item.delivery_id}/fail`, {
       worker_id: workerId,
-      lease_token: item.lease_token,
-      result,
-      error_code: errorCode,
-      error_message: errorMessage,
     });
   }
 }

@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import secrets
@@ -6,54 +5,6 @@ import uuid
 
 from .db import connect
 from .secondary_signals import notify_secondary_outbox_event
-
-
-RETRY_DELAYS_MINUTES = [1, 5, 30, 120]
-DEFAULT_LEASE_SECONDS = 300
-
-
-def _token_hash(token):
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def lease_seconds():
-    raw_value = os.getenv("OUTBOX_LEASE_SECONDS", str(DEFAULT_LEASE_SECONDS))
-    try:
-        value = int(raw_value)
-    except ValueError as exc:
-        raise RuntimeError("OUTBOX_LEASE_SECONDS must be an integer") from exc
-    if value < 30 or value > 3600:
-        raise RuntimeError("OUTBOX_LEASE_SECONDS must be between 30 and 3600")
-    return value
-
-
-def expire_stale_leases(cursor):
-    cursor.execute(
-        """
-        WITH expired AS (
-          UPDATE sales_automation.delivery_outbox
-          SET status = 'unknown',
-              last_error_code = 'LEASE_EXPIRED',
-              last_error_message = 'Worker lease expired before a delivery result was recorded',
-              lease_token_hash = NULL,
-              lease_expires_at = NULL,
-              updated_at = now()
-          WHERE status = 'sending'
-            AND lease_expires_at IS NOT NULL
-            AND lease_expires_at <= now()
-          RETURNING id
-        )
-        UPDATE sales_automation.delivery_attempt attempt
-        SET status = 'unknown', error_code = 'LEASE_EXPIRED',
-            error_message = 'Worker lease expired before a delivery result was recorded',
-            completed_at = now()
-        FROM expired
-        WHERE attempt.outbox_id = expired.id
-          AND attempt.status = 'started'
-        RETURNING attempt.id
-        """
-    )
-    return len(cursor.fetchall())
 
 
 def _cooldown_hours():
@@ -68,13 +19,10 @@ def _cooldown_hours():
 
 
 def claim_delivery(worker_id, channels, providers):
-    # worker_id remains in the API contract; the lease token is the ownership proof.
+    # worker_id and lease_token remain in the API contract for existing consumers.
     token = secrets.token_urlsafe(32)
-    token_hash = _token_hash(token)
-    duration = lease_seconds()
     cooldown = _cooldown_hours()
     with connect() as conn, conn.cursor() as cursor:
-        expire_stale_leases(cursor)
         cursor.execute(
             """
             WITH candidate AS (
@@ -85,22 +33,28 @@ def claim_delivery(worker_id, channels, providers):
                 AND status IN ('queued', 'retry_wait')
                 AND available_at <= now()
                 AND attempt_count < max_attempts
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM sales_automation.delivery_outbox active
-                  WHERE active.channel = delivery_outbox.channel
-                    AND lower(active.recipient_original) =
-                        lower(delivery_outbox.recipient_original)
-                    AND active.status = 'sending'
+                AND (
+                  delivery_outbox.payload->>'lead_id' LIKE 'SYSTEM-TEST-%%'
+                  OR NOT EXISTS (
+                    SELECT 1
+                    FROM sales_automation.delivery_outbox active
+                    WHERE active.channel = delivery_outbox.channel
+                      AND lower(active.recipient_original) =
+                          lower(delivery_outbox.recipient_original)
+                      AND active.status = 'sending'
+                  )
                 )
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM sales_automation.delivery_outbox prior
-                  WHERE prior.channel = delivery_outbox.channel
-                    AND lower(prior.recipient_original) =
-                        lower(delivery_outbox.recipient_original)
-                    AND prior.status = 'sent'
-                    AND prior.sent_at > now() - (%s * interval '1 hour')
+                AND (
+                  delivery_outbox.payload->>'lead_id' LIKE 'SYSTEM-TEST-%%'
+                  OR NOT EXISTS (
+                    SELECT 1
+                    FROM sales_automation.delivery_outbox prior
+                    WHERE prior.channel = delivery_outbox.channel
+                      AND lower(prior.recipient_original) =
+                          lower(delivery_outbox.recipient_original)
+                      AND prior.status = 'sent'
+                      AND prior.sent_at > now() - (%s * interval '1 hour')
+                  )
                 )
                 AND pg_try_advisory_xact_lock(
                   hashtextextended(
@@ -116,18 +70,15 @@ def claim_delivery(worker_id, channels, providers):
             UPDATE sales_automation.delivery_outbox outbox
             SET status = 'sending',
                 attempt_count = attempt_count + 1,
-                lease_token_hash = %s,
-                lease_expires_at = now() + (%s * interval '1 second'),
                 updated_at = now()
             FROM candidate
             WHERE outbox.id = candidate.id
             RETURNING outbox.id, outbox.message_version_id, outbox.channel,
                       outbox.provider, outbox.recipient_original,
                       outbox.sender_account_ref, outbox.payload,
-                      outbox.idempotency_key, outbox.attempt_count,
-                      outbox.lease_expires_at
+                      outbox.idempotency_key, outbox.attempt_count
             """,
-            (channels, providers, cooldown, token_hash, duration),
+            (channels, providers, cooldown),
         )
         row = cursor.fetchone()
         if row is None:
@@ -146,7 +97,7 @@ def claim_delivery(worker_id, channels, providers):
             "delivery_id": str(row[0]),
             "message_version_id": str(row[1]),
             "lease_token": token,
-            "lease_expires_at": row[9],
+            "lease_expires_at": None,
             "schema_version": "1.0",
             "idempotency_key": row[7],
             "channel": row[2],
@@ -161,34 +112,25 @@ def claim_delivery(worker_id, channels, providers):
         }
 
 
-def renew_delivery_lease(delivery_id, worker_id, lease_token):
-    duration = lease_seconds()
+def heartbeat_delivery(delivery_id, worker_id, lease_token):
     with connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
-            UPDATE sales_automation.delivery_outbox
-            SET lease_expires_at = now() + (%s * interval '1 second'),
-                updated_at = now()
+            SELECT 1
+            FROM sales_automation.delivery_outbox
             WHERE id = %s
               AND status = 'sending'
-              AND lease_token_hash = %s
-              AND lease_expires_at > now()
-            RETURNING lease_expires_at
             """,
-            (duration, delivery_id, _token_hash(lease_token)),
+            (delivery_id,),
         )
         row = cursor.fetchone()
-        return row[0] if row else None
+        return row is not None
 
 
 def complete_delivery(
     delivery_id,
     worker_id,
-    lease_token,
-    provider_message_id=None,
-    provider_thread_id=None,
 ):
-    # Kept in the function signature for existing consumers; intentionally not persisted.
     notification = None
     with connect() as conn, conn.cursor() as cursor:
         cursor.execute(
@@ -196,21 +138,14 @@ def complete_delivery(
             UPDATE sales_automation.delivery_outbox
             SET status = 'sent',
                 sent_at = now(),
-                lease_token_hash = NULL,
-                lease_expires_at = NULL,
                 last_error_code = NULL,
                 last_error_message = NULL,
                 updated_at = now()
             WHERE id = %s
               AND status = 'sending'
-              AND lease_token_hash = %s
-              AND lease_expires_at > now()
             RETURNING attempt_count, sent_at, message_version_id
             """,
-            (
-                delivery_id,
-                _token_hash(lease_token),
-            ),
+            (delivery_id,),
         )
         row = cursor.fetchone()
         if row is None:
@@ -235,77 +170,41 @@ def complete_delivery(
     return response
 
 
-def fail_delivery(delivery_id, worker_id, lease_token, result, error_code, error_message):
+def fail_delivery(delivery_id, worker_id):
     with connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
-            SELECT attempt_count, max_attempts
-            FROM sales_automation.delivery_outbox
+            UPDATE sales_automation.delivery_outbox
+            SET status = 'failed',
+                last_error_code = 'CONSUMER_FAILED',
+                last_error_message = 'Consumer reported delivery failure',
+                updated_at = now()
             WHERE id = %s
               AND status = 'sending'
-              AND lease_token_hash = %s
-              AND lease_expires_at > now()
-            FOR UPDATE
+            RETURNING attempt_count
             """,
-            (delivery_id, _token_hash(lease_token)),
+            (delivery_id,),
         )
         row = cursor.fetchone()
         if row is None:
             return None
-        attempt_no, max_attempts = row
-        delay = None
-        if result == "retryable" and attempt_no < max_attempts:
-            if attempt_no <= len(RETRY_DELAYS_MINUTES):
-                delay = RETRY_DELAYS_MINUTES[attempt_no - 1]
-                status = "retry_wait"
-            else:
-                status = "failed"
-        elif result == "unknown":
-            status = "unknown"
-        else:
-            status = "failed"
-
-        cursor.execute(
-            """
-            UPDATE sales_automation.delivery_outbox
-            SET status = %s,
-                available_at = CASE
-                  WHEN %s IS NULL THEN available_at
-                  ELSE now() + (%s * interval '1 minute')
-                END,
-                last_error_code = %s,
-                last_error_message = %s,
-                lease_token_hash = NULL,
-                lease_expires_at = NULL,
-                updated_at = now()
-            WHERE id = %s
-            """,
-            (
-                status,
-                delay,
-                delay,
-                error_code,
-                (error_message or "")[:2000],
-                delivery_id,
-            ),
-        )
+        attempt_no = row[0]
         cursor.execute(
             """
             UPDATE sales_automation.delivery_attempt
-            SET status = %s,
-                error_code = %s,
-                error_message = %s,
+            SET status = 'failed',
+                error_code = 'CONSUMER_FAILED',
+                error_message = 'Consumer reported delivery failure',
                 completed_at = now()
             WHERE outbox_id = %s AND attempt_no = %s AND status = 'started'
             """,
-            (status, error_code, (error_message or "")[:2000], delivery_id, attempt_no),
+            (delivery_id, attempt_no),
         )
-        return {"status": status, "retry_after_minutes": delay}
+        return {"status": "failed"}
 
 
 def queue_status():
     with connect() as conn, conn.cursor() as cursor:
-        expire_stale_leases(cursor)
         cursor.execute(
             """
             SELECT status, count(*)

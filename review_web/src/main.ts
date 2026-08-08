@@ -48,6 +48,24 @@ type QueueRecord = {
   last_error: string | null;
   updated_at: string;
 };
+type OutboxDelivery = {
+  id: string;
+  message_version_id: string;
+  channel: "email" | "linkedin";
+  provider: string;
+  recipient: string;
+  sender_account_ref: string | null;
+  payload: Json;
+  status: string;
+  attempt_count: number;
+  max_attempts: number;
+  available_at: string;
+  sent_at: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
 type SchedulerRun = {
   id: string;
   trigger: string;
@@ -147,6 +165,16 @@ const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;
 const reviewMessagesButton = document.querySelector<HTMLButtonElement>(
   "#review-messages-button",
 )!;
+const reviewChannelFilter = document.querySelector<HTMLSelectElement>(
+  "#review-channel-filter",
+)!;
+const reviewSalesFilter = document.querySelector<HTMLSelectElement>(
+  "#review-sales-filter",
+)!;
+let pendingReviewAll: ReviewMessage[] = [];
+const outboxQueueButton = document.querySelector<HTMLButtonElement>(
+  "#outbox-queue-button",
+)!;
 const pollQueueButton = document.querySelector<HTMLButtonElement>("#poll-queue-button")!;
 const statusBox = document.querySelector<HTMLElement>("#status")!;
 const summary = document.querySelector<HTMLElement>("#summary")!;
@@ -219,6 +247,7 @@ const warningLabels: Record<string, string> = {
   PRICE_FIELDS_INTENTIONALLY_EXCLUDED: "报价字段已按规则排除",
   RECENT_NO_CURRENT_DEMAND: "近期已确认暂无需求",
   FOLLOW_UP_TIMING_UNVERIFIED: "跟进时间尚未确认",
+  CRM_EVIDENCE_REQUIRES_MANUAL_CONFIRMATION: "CRM证据不足，必须人工确认",
   DOCUMENT_AVAILABILITY_UNVERIFIED: "资料是否可提供尚未确认",
   AVAILABILITY_REQUIRES_MANUAL_CONFIRMATION: "资料或产品可用性需人工确认",
   CUSTOMER_REFERENCE_DISCLOSURE_REQUIRES_APPROVAL: "客户案例披露需要审批",
@@ -246,6 +275,15 @@ const queueStatusLabels: Record<string, string> = {
   paused: "已暂停",
   converted: "已转出",
   failed: "失败",
+};
+const outboxStatusLabels: Record<string, string> = {
+  queued: "待投递",
+  sending: "投递中",
+  sent: "已发送",
+  retry_wait: "等待重试",
+  failed: "发送失败",
+  unknown: "结果未知",
+  cancelled: "已取消",
 };
 const eventLabels: Record<string, string> = {
   discovered: "发现线索",
@@ -1099,6 +1137,85 @@ function renderReviewMessages(records: ReviewMessage[]) {
   workspace.classList.remove("hidden");
 }
 
+function renderOutboxDeliveryDetail(delivery: OutboxDelivery) {
+  const payload = delivery.payload || {};
+  const deliveryPanel = document.createElement("div");
+  deliveryPanel.className = "panel";
+  const heading = document.createElement("div");
+  heading.className = "panel-heading";
+  const title = document.createElement("h2");
+  title.textContent = "Outbox 投递信息";
+  heading.append(
+    title,
+    badge(outboxStatusLabels[delivery.status] || delivery.status, delivery.status),
+  );
+  const fields = document.createElement("dl");
+  [
+    ["渠道", delivery.channel === "email" ? "邮件" : "LinkedIn"],
+    ["收件地址", delivery.recipient],
+    ["销售发信账号", delivery.sender_account_ref],
+    ["已尝试次数", `${delivery.attempt_count} / ${delivery.max_attempts}`],
+    ["可领取时间", formatDateTime(delivery.available_at)],
+    ["发送时间", formatDateTime(delivery.sent_at)],
+    ["创建时间", formatDateTime(delivery.created_at)],
+  ].forEach(([key, value]) => fields.append(field(String(key), value)));
+  deliveryPanel.append(heading, fields);
+
+  const contentPanel = document.createElement("div");
+  contentPanel.className = "panel output-panel";
+  const contentHeading = document.createElement("div");
+  contentHeading.className = "panel-heading";
+  const contentTitle = document.createElement("h2");
+  contentTitle.textContent = "待发消息内容";
+  contentHeading.append(contentTitle);
+  contentPanel.append(contentHeading);
+  if (payload.subject) contentPanel.append(block("邮件主题", payload.subject));
+  contentPanel.append(block("客户可见正文", payload.body));
+  if (delivery.last_error_code || delivery.last_error_message) {
+    contentPanel.append(
+      block(
+        "最近失败原因",
+        [delivery.last_error_code, delivery.last_error_message]
+          .filter(Boolean)
+          .join("："),
+      ),
+    );
+  }
+  detail.replaceChildren(deliveryPanel, contentPanel);
+}
+
+function renderOutboxDeliveries(records: OutboxDelivery[]) {
+  recordList.replaceChildren();
+  detail.replaceChildren();
+  recordListTitle.textContent = "Outbox 投递队列";
+  recordCount.textContent = `${records.length} 条`;
+  records.forEach((delivery, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "record-item";
+    const title = document.createElement("strong");
+    const subtitle = document.createElement("span");
+    title.textContent = delivery.recipient;
+    subtitle.textContent = `${delivery.channel === "email" ? "邮件" : "LinkedIn"} · ${formatDateTime(delivery.created_at)}`;
+    button.append(
+      title,
+      subtitle,
+      badge(outboxStatusLabels[delivery.status] || delivery.status, delivery.status),
+    );
+    button.addEventListener("click", () => {
+      recordList.querySelectorAll(".active").forEach((node) => node.classList.remove("active"));
+      button.classList.add("active");
+      renderOutboxDeliveryDetail(delivery);
+    });
+    recordList.append(button);
+    if (index === 0) button.click();
+  });
+  if (!records.length) {
+    detail.append(block("Outbox 投递队列", "当前没有已批准的投递任务"));
+  }
+  workspace.classList.remove("hidden");
+}
+
 function renderQueueDetail(record: QueueRecord, leadDetail?: LeadDetail) {
   const snapshot = leadDetail?.state.crm_snapshot || {};
   const lead = snapshot.lead || {};
@@ -1350,15 +1467,88 @@ async function loadReviewMessages() {
     const result = await request<{ records: ReviewMessage[] }>(
       "/api/review/messages?status=pending_review&limit=200",
     );
-    renderReviewMessages(result.records);
+    pendingReviewAll = result.records;
+    refreshSalesFilterOptions(pendingReviewAll);
+    applyReviewFilters();
+    const filtered = filterReviewMessages(pendingReviewAll);
+    const total = pendingReviewAll.length;
+    if (!total) {
+      setStatus("当前没有等待人工审阅的正式消息", "");
+    } else if (filtered.length === total) {
+      setStatus(`已加载 ${total} 条待审消息`, "success");
+    } else {
+      setStatus(
+        `已加载 ${total} 条待审消息，过滤后显示 ${filtered.length} 条`,
+        "success",
+      );
+    }
+  } finally {
+    reviewMessagesButton.disabled = false;
+  }
+}
+
+function filterReviewMessages(records: ReviewMessage[]): ReviewMessage[] {
+  const channel = reviewChannelFilter.value;
+  const sales = reviewSalesFilter.value;
+  return records.filter((message) => {
+    if (channel && message.channel !== channel) return false;
+    if (sales) {
+      const name = (message.crm_snapshot?.sales || {}).name;
+      if (name !== sales) return false;
+    }
+    return true;
+  });
+}
+
+function refreshSalesFilterOptions(records: ReviewMessage[]): void {
+  const current = reviewSalesFilter.value;
+  const names = new Set<string>();
+  for (const message of records) {
+    const name = (message.crm_snapshot?.sales || {}).name;
+    if (name) names.add(String(name));
+  }
+  const sorted = [...names].sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+  reviewSalesFilter.replaceChildren();
+  const allOption = document.createElement("option");
+  allOption.value = "";
+  allOption.textContent = "全部";
+  reviewSalesFilter.append(allOption);
+  for (const name of sorted) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    reviewSalesFilter.append(option);
+  }
+  if (current && sorted.includes(current)) {
+    reviewSalesFilter.value = current;
+  } else {
+    reviewSalesFilter.value = "";
+  }
+}
+
+function applyReviewFilters(): void {
+  const filtered = filterReviewMessages(pendingReviewAll);
+  renderReviewMessages(filtered);
+}
+
+async function loadOutboxDeliveries() {
+  outboxQueueButton.disabled = true;
+  summary.classList.add("hidden");
+  workspace.classList.add("hidden");
+  setStatus("正在读取 Outbox 投递队列…", "running");
+  try {
+    const result = await request<{ records: OutboxDelivery[] }>(
+      "/api/outbox/deliveries?limit=500",
+    );
+    renderOutboxDeliveries(result.records);
     setStatus(
       result.records.length
-        ? `已加载 ${result.records.length} 条待审消息`
-        : "当前没有等待人工审阅的正式消息",
+        ? `已加载 ${result.records.length} 条 Outbox 投递任务（只读）`
+        : "当前没有已批准的投递任务",
       result.records.length ? "success" : "",
     );
   } finally {
-    reviewMessagesButton.disabled = false;
+    outboxQueueButton.disabled = false;
   }
 }
 
@@ -1386,6 +1576,40 @@ form.addEventListener("submit", async (event) => {
 reviewMessagesButton.addEventListener("click", async () => {
   try {
     await loadReviewMessages();
+  } catch (error) {
+    showError(error);
+  }
+});
+
+reviewChannelFilter.addEventListener("change", () => {
+  if (!pendingReviewAll.length) return;
+  applyReviewFilters();
+  const total = pendingReviewAll.length;
+  const filtered = filterReviewMessages(pendingReviewAll);
+  setStatus(
+    filtered.length === total
+      ? `已加载 ${total} 条待审消息`
+      : `已加载 ${total} 条待审消息，过滤后显示 ${filtered.length} 条`,
+    filtered.length ? "success" : "",
+  );
+});
+
+reviewSalesFilter.addEventListener("change", () => {
+  if (!pendingReviewAll.length) return;
+  applyReviewFilters();
+  const total = pendingReviewAll.length;
+  const filtered = filterReviewMessages(pendingReviewAll);
+  setStatus(
+    filtered.length === total
+      ? `已加载 ${total} 条待审消息`
+      : `已加载 ${total} 条待审消息，过滤后显示 ${filtered.length} 条`,
+    filtered.length ? "success" : "",
+  );
+});
+
+outboxQueueButton.addEventListener("click", async () => {
+  try {
+    await loadOutboxDeliveries();
   } catch (error) {
     showError(error);
   }

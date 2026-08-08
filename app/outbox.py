@@ -1,4 +1,5 @@
 import hashlib
+import html
 import json
 import re
 import uuid
@@ -12,6 +13,14 @@ from .secondary_signals import notify_secondary_outbox_event
 
 
 EMAIL_PATTERN = re.compile(r"^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$")
+
+
+def _body_html(body):
+    return "".join(
+        f"<p>{html.escape(paragraph.strip()).replace(chr(10), '<br>')}</p>"
+        for paragraph in re.split(r"\n\s*\n", body)
+        if paragraph.strip()
+    )
 
 
 def valid_email(value):
@@ -336,6 +345,7 @@ def approve_message(message_id, reviewer, subject=None, body=None, note=None):
                 "to": row[2],
                 "subject": final_subject,
                 "body": final_body,
+                "body_html": _body_html(final_body) if channel == "email" else None,
                 "language": effective.get("language", "English"),
                 "contact_name": (crm.get("contact") or {}).get("name"),
                 "company_name": (crm.get("company") or {}).get("name"),
@@ -403,3 +413,40 @@ def list_outbox(limit=20):
             (limit,),
         )
         return cursor.fetchall()
+
+
+def list_outbox_deliveries(limit=50):
+    with connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, message_version_id, channel, provider, recipient_original,
+                   sender_account_ref, payload, status, attempt_count, max_attempts,
+                   available_at, sent_at, last_error_code, last_error_message,
+                   created_at, updated_at
+            FROM sales_automation.delivery_outbox
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return [
+            {
+                "id": str(row[0]),
+                "message_version_id": str(row[1]),
+                "channel": row[2],
+                "provider": row[3],
+                "recipient": row[4],
+                "sender_account_ref": row[5],
+                "payload": row[6],
+                "status": row[7],
+                "attempt_count": row[8],
+                "max_attempts": row[9],
+                "available_at": row[10],
+                "sent_at": row[11],
+                "last_error_code": row[12],
+                "last_error_message": row[13],
+                "created_at": row[14],
+                "updated_at": row[15],
+            }
+            for row in cursor.fetchall()
+        ]

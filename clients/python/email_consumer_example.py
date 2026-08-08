@@ -44,14 +44,8 @@ def validate_delivery(item):
     return payload
 
 
-def report_failure(client, item, worker_id, result, code, message):
-    client.fail(
-        item,
-        worker_id,
-        result=result,
-        error_code=code,
-        error_message=str(message)[:2000],
-    )
+def report_failure(client, item, worker_id):
+    client.fail(item, worker_id)
 
 
 def consume_once(client, worker_id):
@@ -69,26 +63,19 @@ def consume_once(client, worker_id):
     item = items[0]
     try:
         payload = validate_delivery(item)
-        provider_result = gmail_sender.send(payload)
-        client.complete(
-            item,
-            worker_id,
-            provider_message_id=provider_result.get("id"),
-            provider_thread_id=provider_result.get("threadId"),
-        )
+        gmail_sender.send(payload)
+        client.complete(item, worker_id)
         print(f"Completed delivery {item['delivery_id']}.")
     except ValueError as exc:
-        report_failure(client, item, worker_id, "permanent", "INVALID_TASK", exc)
+        report_failure(client, item, worker_id)
     except HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else 0
-        result = "retryable" if status == 429 or status >= 500 else "permanent"
-        report_failure(client, item, worker_id, result, f"GMAIL_HTTP_{status}", exc)
+        report_failure(client, item, worker_id)
     except (Timeout, ConnectionError) as exc:
         # The request may have reached Gmail. Do not retry automatically.
-        report_failure(client, item, worker_id, "unknown", "GMAIL_RESULT_UNKNOWN", exc)
+        report_failure(client, item, worker_id)
     except Exception as exc:
         # Configuration/OAuth failures happen before Gmail confirms a send.
-        report_failure(client, item, worker_id, "retryable", "WORKER_ERROR", exc)
+        report_failure(client, item, worker_id)
     return True
 
 

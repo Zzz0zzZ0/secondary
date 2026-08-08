@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from app.secondary.classification import validate_classification
+from app.secondary.message_policy import MANUAL_CONFIRMATION_WARNING
 from app.secondary.message_policy import prepare_message_record
 from app.secondary.message_policy import validation_errors
 from app.secondary_scheduler import _needs_policy_reclassification
@@ -75,16 +76,23 @@ class SecondaryReferralTest(unittest.TestCase):
         self.assertEqual(validated["recommended_by"], [])
 
     def test_policy_treats_colleague_handoff_as_referral(self):
-        policy = (
+        classification_policy = (
             Path(__file__).resolve().parents[1]
             / "skill"
             / "classify-secondary-lead"
             / "SKILL.md"
         ).read_text(encoding="utf-8")
+        message_policy = (
+            Path(__file__).resolve().parents[1]
+            / "skill"
+            / "generate-secondary-lead-message"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8")
         note = "告知后续他的同事：Lucchi会负责跟进"
         candidate = self._candidate("recommender", "Lucchi", note)
 
-        self.assertIn("后续由同事接手", policy)
+        self.assertIn("后续由同事接手", classification_policy)
+        self.assertIn("sales team has already contacted", message_policy)
         validated = validate_classification(
             candidate, self._record("Mario Vicari", note)
         )
@@ -193,6 +201,44 @@ class SecondaryReferralTest(unittest.TestCase):
             "判断理由必须使用简体中文",
             validation_errors(candidate, crm_input, "lead-1"),
         )
+
+    def test_insufficient_crm_evidence_creates_review_only_draft(self):
+        crm_input = prepare_message_record(
+            {
+                "lead": {"id": "lead-1"},
+                "output": {"type": "email"},
+                "sales": {"name": "倩文 于"},
+            },
+            None,
+        )
+        candidate = {
+            "decision": "generated",
+            "lead_id": "lead-1",
+            "output_type": "email",
+            "content": {
+                "subject": "Following up",
+                "subject_zh": "跟进确认",
+                "body": "Hello,\n\nCould you please share the information you would like us to review?\n\nBest regards,\nChloe\nAceler International",
+                "body_zh": "您好，\n\n请告知希望我们协助确认的信息。\n\n此致，\nChloe\nAceler International",
+            },
+            "message_goal": "请客户补充需要确认的信息。",
+            "information_requested": ["需确认的具体信息"],
+            "warnings": [MANUAL_CONFIRMATION_WARNING],
+            "reason": "CRM缺少可靠跟进时间和明确沟通证据，生成低风险草稿供人工确认。",
+            "review_required": True,
+        }
+
+        self.assertTrue(crm_input["message_generation_eligibility"]["allowed"])
+        self.assertTrue(
+            crm_input["message_generation_eligibility"]["requires_manual_confirmation"]
+        )
+        self.assertEqual(validation_errors(candidate, crm_input, "lead-1"), [])
+        candidate["warnings"] = []
+        self.assertIn(
+            "CRM证据不足时必须标记为需要人工确认",
+            validation_errors(candidate, crm_input, "lead-1"),
+        )
+
 
     def test_v6_reclassifies_unknown_recommend_records_only(self):
         class Row(dict):

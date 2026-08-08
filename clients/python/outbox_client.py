@@ -44,25 +44,18 @@ class OutboxClient:
             {"worker_id": worker_id, "lease_token": item["lease_token"]},
         )
 
-    def complete(self, item, worker_id, provider_message_id=None, provider_thread_id=None):
+    def complete(self, item, worker_id):
         return self._post(
             f"/v1/deliveries/{item['delivery_id']}/complete",
             {
                 "worker_id": worker_id,
-                "lease_token": item["lease_token"],
-                "provider_message_id": provider_message_id,
-                "provider_thread_id": provider_thread_id,
             },
         )
 
-    def fail(self, item, worker_id, result, error_code, error_message=""):
+    def fail(self, item, worker_id):
         return self._post(
             f"/v1/deliveries/{item['delivery_id']}/fail",
             {
                 "worker_id": worker_id,
-                "lease_token": item["lease_token"],
-                "result": result,
-                "error_code": error_code,
-                "error_message": error_message,
             },
         )

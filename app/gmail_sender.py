@@ -97,6 +97,8 @@ def build_raw_message(payload):
     if from_address:
         message["From"] = from_address
     message.set_content(payload["body"])
+    if payload.get("body_html"):
+        message.add_alternative(payload["body_html"], subtype="html")
     return base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
 
 

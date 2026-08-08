@@ -107,6 +107,19 @@
           </label>
           <button id="start-button" type="submit">从已排期线索生成预览</button>
           <button id="review-messages-button" type="button">审核待发送消息</button>
+          <label class="filter">渠道
+            <select id="review-channel-filter">
+              <option value="">全部</option>
+              <option value="email">邮件</option>
+              <option value="linkedin">领英</option>
+            </select>
+          </label>
+          <label class="filter">销售
+            <select id="review-sales-filter">
+              <option value="">全部</option>
+            </select>
+          </label>
+          <button id="outbox-queue-button" type="button">查看 Outbox 投递队列</button>
           <button id="poll-queue-button" type="button">查看二级线索队列</button>
         </form>
         <div id="status" class="status" aria-live="polite">预览仅保存到本地审阅结果，不进入 Outbox</div>

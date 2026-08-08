@@ -8,12 +8,10 @@ For a step-by-step Chinese consumer integration guide, see
 ## Consumer protocol
 
 1. `POST /v1/deliveries/claim`
-2. `POST /v1/deliveries/{id}/heartbeat` when processing approaches the lease interval
-3. `POST /v1/deliveries/{id}/complete` after confirmed provider acceptance
-4. `POST /v1/deliveries/{id}/fail` with `retryable`, `permanent`, or `unknown`
+2. `POST /v1/deliveries/{id}/complete` after confirmed provider acceptance
+3. `POST /v1/deliveries/{id}/fail` when delivery fails
 
-Use `unknown` whenever the provider may have accepted the message but the result cannot be confirmed.
-Do not automatically retry an `unknown` delivery.
+Both writeback requests only require `worker_id`; the delivery ID is in the URL.
 
 Every consumer sends `Authorization: Bearer <token>`. Configure token scopes as:
 
@@ -31,7 +29,7 @@ Apply migrations first:
 ./bin/twenty-hermes migrate
 ```
 
-Before applying migration `005`, stop any legacy `send-once` or
+Before applying migration `006`, stop any legacy `send-once` or
 `start-outbox-reaper` process that is still running. Restart the Outbox API
 after the migration.
 
@@ -42,8 +40,8 @@ Generate local API tokens once, then run:
 ./bin/start-outbox-service
 ```
 
-Expired leases are marked `unknown` lazily by claim and status requests; no
-separate reaper service is required.
+Claimed tasks remain `sending` until the consumer reports `complete` or `fail`.
+The heartbeat endpoint is retained as a no-op compatibility endpoint.
 
 OpenAPI is available at `http://127.0.0.1:8010/docs`.
 
@@ -65,4 +63,5 @@ when using it, set `OUTBOX_DB_HOST=outbox-postgres` and `OUTBOX_DB_PORT=5432`.
 - `clients/python/outbox_client.py`
 - `clients/typescript/outbox-client.ts`
 
-Both clients implement claim, heartbeat, complete, and fail without external runtime dependencies.
+Both clients preserve compatibility with claim, heartbeat, complete, and fail
+without external runtime dependencies.

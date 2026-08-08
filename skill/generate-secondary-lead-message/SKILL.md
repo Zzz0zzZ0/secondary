@@ -33,12 +33,13 @@ Use:
 
 If the input `warnings` contains `DO_NOT_CONTACT`, return `no_message` with null content. This deterministic suppression rule overrides the lead-type rules and all generation defaults.
 
-If `message_generation_eligibility.allowed` is `false`, return `cannot_generate`
-with null content and preserve
-`MESSAGE_GENERATION_BLOCKED_INSUFFICIENT_CRM_EVIDENCE`. Do not construct a
-generic outreach from company research, product keywords, or model knowledge.
-This integration-owned gate means both the reliable follow-up time and explicit
-CRM communication evidence are insufficient.
+If `message_generation_eligibility.requires_manual_confirmation` is `true`,
+still generate the safest useful draft and preserve
+`CRM_EVIDENCE_REQUIRES_MANUAL_CONFIRMATION`. This draft always requires human
+approval before delivery. Use only the supplied CRM facts; when they do not
+support a specific follow-up, write a conservative clarification or holding
+message rather than inventing a customer requirement from company research or
+product keywords.
 
 The decision rules in this section take precedence over all later content restrictions.
 
@@ -84,34 +85,22 @@ For email:
 - Write a specific, concise subject.
 - Usually write 60–180 words.
 - Display the salesperson's name in Latin letters. Never place Chinese characters in the sender name or signature.
-- First check
-  [references/sender-identity-map.md](references/sender-identity-map.md).
+- First check [references/sender-identity-map.md](references/sender-identity-map.md).
   Normalize leading, trailing, and repeated whitespace, then require an exact
   CRM name match; never reorder names or use fuzzy matching. A mapped display
   name overrides `conversation_sender_identity`, the fallback rules, and any
-  conflicting supplied signature.
-  Do not add transliteration or missing-English-name warnings for a matched
-  identity. The mapped sender account is routing metadata and must never appear
-  in the customer-facing message.
+  conflicting supplied signature. The mapped sender account is routing metadata
+  and must never appear in the customer-facing message.
 - When no exact sender identity map match exists and
   `conversation_sender_identity.name` is supplied, use that exact,
   classification-validated customer-used name as the sender name and signature.
-  It overrides `sales.name` and the supplied signature, but never changes
-  `contact.name` or the recipient greeting.
-- Only when neither an exact sender identity map match nor
-  `conversation_sender_identity.name` is available, choose the sender name in
-  this order:
-  1. Use the verified `sales.name_en` or `sales.english_name` when supplied.
-  2. Use `sales.name` directly when it is already a verified Latin-script name.
-  3. Otherwise transliterate a supplied Chinese `sales.name` into standard Hanyu Pinyin: use no tone marks or tone numbers, keep family-name-first order, separate the family name and given name with one space, join the syllables within a multi-syllable given name, and capitalize the first letter of each name component. Examples: `张小明` → `Zhang Xiaoming`; `欧阳娜娜` → `Ouyang Nana`.
-- When that fallback transliterates a Chinese name, use the conventional surname
-  pronunciation. Add `SALES_NAME_TRANSLITERATED`, and also add
-  `SALES_NAME_TRANSLITERATION_UNCERTAIN` when a polyphonic or uncommon
-  character cannot be resolved confidently from the input.
-- If no verified English/Latin name exists and the Chinese name cannot be transliterated reliably, omit the personal name, sign as `Aceler International`, and add `SALES_ENGLISH_NAME_MISSING`.
-- Use the supplied sales signature only when its sender name complies with these rules; otherwise reconstruct the signature as `Best regards,` + the selected English-form sales name + `Aceler International`.
-- Do not infer a salesperson's name from an email address, username, company research, or model memory.
-- Add `MISSING_SALES_SIGNATURE` when the signature is absent; still generate when the body is otherwise usable.
+- Otherwise use verified `sales.name_en` or `sales.english_name`; if unavailable,
+  use a review-flagged Hanyu Pinyin transliteration of `sales.name`. If that is
+  not reliable, sign as `Aceler International` and add `SALES_ENGLISH_NAME_MISSING`.
+- Use the supplied sales signature only when its sender name complies with these
+  rules; otherwise reconstruct it as `Best regards,` + the selected English-form
+  sales name + `Aceler International`. Do not infer a name from an email address,
+  username, company research, or model memory.
 
 If `warnings` contains `CONTACT_NAME_LOW_CONFIDENCE`, do not address the recipient by the supplied name. Use a neutral greeting such as `Hello,` for email, or omit the greeting for LinkedIn.
 
@@ -165,6 +154,10 @@ Apply the CRM lead subtype:
   thank them for the recommendation or ask them to introduce, remind, copy, or
   forward to the referred person; do not write as though a third party referred
   the current contact.
+- When the current contact is the recommender, the referred person's contact
+  details are absent from the record, and the grounded referral evidence says
+  the sales team has already contacted that person, return `no_message` for the
+  recommender. Do not send a reminder or another introduction request.
 - Allow at most two unanswered outreach messages to the referred contact. After two unanswered attempts, return `no_message`; use `message_goal`/`reason` to indicate that the next internal action is to ask the recommender to remind or forward, not to send a third ordinary pitch.
 - Once the referred contact replies, respond to the reply and follow the CRM's updated subtype or inquiry state; do not reclassify it yourself.
 
@@ -267,7 +260,6 @@ Do not:
 
 The following list is exhaustive. Return `cannot_generate` only when one of these is true:
 
-- `message_generation_eligibility.allowed` is `false`;
 - `lead.id`, `lead.type`, or `output.type` is missing;
 - the designated contact record is missing;
 - the address required by the specified channel is missing and the input does not contain
@@ -302,10 +294,8 @@ Before returning, verify:
 - completed actions are not restarted;
 - subtype-specific cadence and attempt limits are respected;
 - referral names and relationships come from explicit CRM data;
-- the salesperson name and signature use the customer-confirmed conversation
-  sender identity when supplied, otherwise the mapped sender identity, verified
-  English name, or a review-flagged Hanyu Pinyin transliteration, with no Chinese
-  characters;
+- the salesperson name and signature use the mapped or customer-confirmed
+  English identity, with no Chinese characters;
 - unsupported portions are safely deferred rather than invented;
 - products outside the approved portfolio are deferred for factory or manufacturing-partner confirmation without an availability promise;
 - factory/trading and Aceler/Okayama explanations use only approved business facts;

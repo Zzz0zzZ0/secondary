@@ -27,7 +27,8 @@ OUTBOX_WORKER_ID=<稳定且唯一的消费者名称>
 
 | 字段 | 消费者要求 |
 |---|---|
-| `delivery_id`、`lease_token` | 原样保存，用于后续回写与续租 |
+| `delivery_id` | 原样保存，用于后续回写 |
+| `lease_token` | 可选兼容字段；新消费者无需保存或回传 |
 | `idempotency_key` | 持久化保存；同一键只允许实际发送一次 |
 | `channel`、`provider` | 必须与当前消费者匹配 |
 | `recipient`、`payload` | 唯一发送目标及内容；不得自行改写收件人 |
@@ -37,22 +38,20 @@ Email 还必须校验 `payload.to == recipient`，且主题、正文均非空。
 
 ## 结果回写
 
-所有回写都带原来的 `worker_id` 和 `lease_token`，并使用领取到的 `delivery_id`：
+所有回写都带 `worker_id` 并使用领取到的 `delivery_id`；旧消费者可继续附带 `lease_token`：
 
 | 情况 | 接口 | 要求 |
 |---|---|---|
-| 处理接近租约到期 | `POST /v1/deliveries/{id}/heartbeat` | 先续租，再继续处理 |
-| 平台明确确认已发送 | `POST /v1/deliveries/{id}/complete` | 仅在确认成功后调用 |
-| 明确未发送 | `POST /v1/deliveries/{id}/fail` | `result` 为 `retryable` 或 `permanent` |
-| 可能已发送但无法确认 | `POST /v1/deliveries/{id}/fail` | `result=unknown`，禁止自动重试 |
+| 平台明确确认已发送 | `POST /v1/deliveries/{id}/complete` | 请求体仅含 `worker_id` |
+| 发送失败或结果无法确认 | `POST /v1/deliveries/{id}/fail` | 请求体仅含 `worker_id`，任务标记 `failed` |
 
 平台消息 ID 可以随 `complete` 传入，但 Outbox 不保存它；消费者可自行留作排障记录。
 
 ## 必须遵守的失败处理
 
 - 发送平台已接受、但消费者在 `complete` 前崩溃：按 `idempotency_key` 找到原发送结果，只回写 `complete`，不得再次发送；
-- 网络超时、断线等无法判断是否已发送：回写 `unknown`；
-- 租约过期或不匹配（`409`）：停止处理该任务，不能继续发送；
+- 网络超时、断线等无法判断是否已发送：回写 `fail`，任务不会自动重试；
+- 任务已不处于 `sending`（`409`）：停止处理该任务，不能继续发送；
 - `401` / `403`：检查 Token 与渠道权限；`422`：检查请求字段；`503`：稍后重试服务连通性。
 
 服务检查：`GET /health`、`GET /ready`；在线接口定义：`/docs`、`/openapi.json`。

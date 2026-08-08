@@ -171,6 +171,12 @@ WITH secondary_records AS (
       ),
       'output', jsonb_build_object(
         'type', CASE
+          WHEN person.source::text = 'LINKEDIN' AND contact_channel.linkedin_url IS NOT NULL THEN 'linkedin'
+          WHEN person.source::text IN ('EMAIL', 'YOU_XIANG', 'YI_LIU') AND contact_channel.email IS NOT NULL THEN 'email'
+          WHEN person.source::text = 'LINKEDIN' AND contact_channel.email IS NOT NULL THEN 'email'
+          WHEN person.source::text IN ('EMAIL', 'YOU_XIANG', 'YI_LIU') AND contact_channel.linkedin_url IS NOT NULL THEN 'linkedin'
+          WHEN person.source::text = 'WHATSAPP' AND contact_channel.linkedin_url IS NOT NULL THEN 'linkedin'
+          WHEN person.source::text = 'WHATSAPP' AND contact_channel.email IS NOT NULL THEN 'email'
           WHEN contact_channel.email IS NOT NULL THEN 'email'
           WHEN contact_channel.linkedin_url IS NOT NULL THEN 'linkedin'
           ELSE 'email'
