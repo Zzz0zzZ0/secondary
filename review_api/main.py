@@ -60,6 +60,11 @@ class ClassificationReviewRequest(BaseModel):
     note: Optional[str] = Field(default=None, max_length=2000)
 
 
+class LeadRetryRequest(BaseModel):
+    actor: str = Field(default="review-ui", min_length=1, max_length=200)
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
 class ReviewModeRequest(BaseModel):
     enabled: bool
     actor: str = Field(default="review-ui", min_length=1, max_length=200)
@@ -238,6 +243,20 @@ def confirm_polling_classification(
             lead_id,
             request.lead_type,
             request.reviewer,
+            request.note,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="二级线索不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/polling/leads/{lead_id}/retry")
+def retry_polling_lead(lead_id: str, request: LeadRetryRequest):
+    try:
+        return _polling_store().retry_attention(
+            lead_id,
+            request.actor,
             request.note,
         )
     except KeyError as exc:

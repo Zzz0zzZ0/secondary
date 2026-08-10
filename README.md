@@ -43,7 +43,8 @@ CRM。
 测试阶段可运行：
 
 ```bash
-./bin/start-review-ui
+# 仅本机访问时绑定回环地址
+REVIEW_UI_HOST=127.0.0.1 ./bin/start-review-ui
 ```
 
 默认直接使用已构建的前端。修改 `review_web/src` 后可执行
@@ -61,7 +62,22 @@ GMAIL_SEND_ENABLED=false
 EMAIL_LIVE_SEND_ENABLED=false
 ```
 
-因此当前审阅测试不需要启动 Outbox 服务。
+因此当前审阅测试不需要启动下游发信消费者；Review UI 启动时仍会执行 Outbox 数据库预检。
+
+需要在前台查看完整本地链路时，分别打开三个终端：
+
+```bash
+# 终端 1：Outbox API（仅本机访问）
+OUTBOX_API_HOST=127.0.0.1 ./bin/start-outbox-service
+
+# 终端 2：常驻调度器
+./bin/hermes-poller run
+
+# 终端 3：Review UI（仅本机访问）
+REVIEW_UI_HOST=127.0.0.1 ./bin/start-review-ui
+```
+
+随后访问 `http://127.0.0.1:8000`。停止前台进程使用 `Ctrl-C`；不会删除本地 SQLite 或运行日志。
 
 ## 二级线索调度
 
@@ -84,6 +100,10 @@ EMAIL_LIVE_SEND_ENABLED=false
 
 Review UI 可查看二级线索队列并从已排期记录生成消息预览。详细说明见
 [`docs/HERMES_POLLING.md`](docs/HERMES_POLLING.md)。
+
+看板的“需人工处理”阶段汇总 `needs_review`、`needs_contact` 和 `failed`，点击后可直接
+定位这些记录；“暂停与已转出”只包含 `paused` 和 `converted`。缺少联系人或消息生成失败的
+记录可在详情中人工重新排期，分别用于补充 CRM 联系方式后的重试和失败后的显式重试。
 
 当日运行报告按上海时区当天 00:00 至手动触发时刻汇总，只读访问调度 SQLite 和 Outbox
 PostgreSQL，输出到 `outputs/runtime-reports/`。可在 Review UI 点击“生成当日报告”，

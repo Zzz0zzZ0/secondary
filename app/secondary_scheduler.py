@@ -1131,6 +1131,57 @@ class SecondaryLeadScheduler:
             "reviewer": reviewer,
         }
 
+    def retry_attention(
+        self,
+        lead_id: str,
+        actor: str = "review-ui",
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        actor = actor.strip()
+        if not actor or len(actor) > 200:
+            raise RuntimeError("Actor must be between 1 and 200 characters")
+        if note is not None and len(note) > 2000:
+            raise RuntimeError("Retry note must be at most 2000 characters")
+        now_text = isoformat(self.now())
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status FROM secondary_lead_state WHERE lead_id = ?",
+                (lead_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(lead_id)
+            if row["status"] not in {"needs_contact", "failed"}:
+                raise RuntimeError("This lead is not waiting for a manual retry")
+            connection.execute(
+                """
+                UPDATE secondary_lead_state
+                SET status = 'scheduled',
+                    next_action_at = ?,
+                    last_error = NULL,
+                    updated_at = ?
+                WHERE lead_id = ?
+                """,
+                (now_text, now_text, lead_id),
+            )
+            self._event(
+                connection,
+                lead_id,
+                "manual_retry_queued",
+                {
+                    "previous_status": row["status"],
+                    "actor": actor,
+                    "note": note,
+                    "next_action_at": now_text,
+                },
+            )
+        self._notify_scheduler()
+        return {
+            "lead_id": lead_id,
+            "status": "scheduled",
+            "next_action_at": now_text,
+        }
+
     def _export_current_record(self, lead_id: str) -> Optional[Dict[str, Any]]:
         records = self._export_batch(
             "",

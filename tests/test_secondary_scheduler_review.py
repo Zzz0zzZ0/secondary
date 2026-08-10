@@ -7,6 +7,69 @@ from app.secondary_scheduler import SecondaryLeadScheduler
 
 
 class SecondarySchedulerReviewTest(unittest.TestCase):
+    def test_retry_attention_requeues_contact_and_failed_leads(self):
+        now = datetime(2026, 8, 8, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            with scheduler._connect() as connection:
+                for lead_id, status in (("contact-lead", "needs_contact"), ("failed-lead", "failed")):
+                    connection.execute(
+                        """
+                        INSERT INTO secondary_lead_state
+                          (lead_id, source_hash, source_updated_at, source_record_id,
+                           crm_snapshot_json, lead_type, status, last_error,
+                           last_seen_at, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            lead_id,
+                            f"source-{lead_id}",
+                            now.isoformat(),
+                            lead_id,
+                            "unknown_demand",
+                            status,
+                            "old error",
+                            now.isoformat(),
+                            now.isoformat(),
+                            now.isoformat(),
+                        ),
+                    )
+
+            for lead_id in ("contact-lead", "failed-lead"):
+                result = scheduler.retry_attention(lead_id, "reviewer", "manual retry")
+                self.assertEqual("scheduled", result["status"])
+                self.assertEqual(now.isoformat(), result["next_action_at"])
+
+            with scheduler._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT lead_id, status, next_action_at, last_error
+                    FROM secondary_lead_state
+                    ORDER BY lead_id
+                    """
+                ).fetchall()
+                events = connection.execute(
+                    """
+                    SELECT lead_id, event_type
+                    FROM secondary_lead_event
+                    ORDER BY id
+                    """
+                ).fetchall()
+            self.assertEqual(
+                [("contact-lead", "scheduled", now.isoformat(), None),
+                 ("failed-lead", "scheduled", now.isoformat(), None)],
+                [tuple(row) for row in rows],
+            )
+            self.assertEqual(
+                [("contact-lead", "manual_retry_queued"),
+                 ("failed-lead", "manual_retry_queued")],
+                [tuple(row) for row in events],
+            )
+
     def test_rejected_message_returns_lead_to_classification_review(self):
         now = datetime(2026, 8, 8, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:

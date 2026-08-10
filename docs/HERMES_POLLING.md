@@ -124,6 +124,22 @@ Review UI 顶部按钮可即时开启或关闭人工审阅。实际运行值保�
 `once`、`scan` 和 `dispatch` 仍保持严格模式：缺少对应数据库配置或连接失败时直接退出。
 离线模式不会获取新的 CRM 数据，也不会写入 Outbox。
 
+Review UI 看板将需要人工介入的状态集中在“需人工处理”阶段：
+
+- `needs_review`：人工确认分类；
+- `needs_contact`：在 CRM 补充有效邮箱或 LinkedIn 后，人工重新排期；
+- `failed`：确认失败原因后，人工重新排期生成消息。
+
+“暂停与已转出”阶段只包含 `paused` 和 `converted`，避免把可重试异常隐藏在暂停队列中。
+重新排期是显式操作，不会自动无限重试，并写入 `manual_retry_queued` 事件：
+
+```text
+POST /api/polling/leads/{lead_id}/retry
+```
+
+当前 Review UI 仅适合在可信网络或受保护的反向代理后运行；项目本身尚未提供公网登录和
+角色权限层，不应直接暴露 `8000` 端口。
+
 ## 当日运行报告
 
 默认手动报告按 `TWENTY_BUSINESS_TIMEZONE`（默认 `Asia/Shanghai`）统计当天 00:00 至
@@ -186,6 +202,7 @@ GET /api/polling/queue?limit=50
 GET /api/polling/queue?limit=500&status=needs_review,scheduled
 GET /api/polling/leads/{lead_id}
 POST /api/polling/leads/{lead_id}/classification
+POST /api/polling/leads/{lead_id}/retry
 GET /api/review/messages?status=pending_review&limit=200
 GET /api/review/messages/{message_id}
 PATCH /api/review/messages/{message_id}
@@ -199,7 +216,8 @@ POST /api/review/messages/{message_id}/reject
 使用正式调度相同的分类与排期上下文，但不修改状态、不写入 Outbox。只有低置信度分类
 记录提供人工分类确认按钮。正式待审消息可人工修改，或输入新限制和方向让 Hermes
 重新生成；重新生成后仍为 `pending_review`。批准会创建 `delivery_outbox`，拒绝不会
-创建投递任务。页面没有扫描或直接发送按钮。
+创建投递任务。`needs_contact` 和 `failed` 记录可通过 retry 接口显式重新排期，不会自动
+无限重试。页面没有扫描或直接发送按钮。
 
 对于“（被）推荐”记录，当前 CRM 联系人就是被推荐人和消息接收人。分类阶段只从 CRM
 原文提取结构化 `recommended_by` 推荐人姓名和关系证据，不替换当前联系人，也不要求

@@ -297,6 +297,7 @@ const eventLabels: Record<string, string> = {
   message_generation_completed: "消息生成完成",
   message_generation_failed: "消息生成失败",
   automatic_approval_failed: "自动批准失败",
+  manual_retry_queued: "手动重新排期",
   left_secondary_lead_scope: "离开二级线索范围",
   outbox_approved: "Outbox 已批准",
   outbox_sent: "投递成功",
@@ -391,7 +392,11 @@ function renderDashboard(data: DashboardData) {
 
   const stages = [
     { label: "沉淀与分类", statuses: ["settling", "classifying"] },
-    { label: "人工复核", statuses: ["needs_review"], tone: "attention" },
+    {
+      label: "需人工处理",
+      statuses: ["needs_review", "needs_contact", "failed"],
+      tone: "attention",
+    },
     { label: "已排期", statuses: ["scheduled"] },
     {
       label: "生成与审阅",
@@ -400,8 +405,8 @@ function renderDashboard(data: DashboardData) {
     },
     { label: "等待投递", statuses: ["waiting_delivery"] },
     {
-      label: "暂停与异常",
-      statuses: ["needs_contact", "paused", "converted", "failed"],
+      label: "暂停与已转出",
+      statuses: ["paused", "converted"],
       tone: "error",
     },
   ];
@@ -1331,6 +1336,56 @@ function renderQueueDetail(record: QueueRecord, leadDetail?: LeadDetail) {
     });
     reviewSection.append(reviewHeading, reviewHint, actions);
     reasonPanel.append(reviewSection);
+  }
+  const canRetry = record.status === "needs_contact" || record.status === "failed";
+  if (canRetry) {
+    const retrySection = document.createElement("section");
+    retrySection.className = "classification-review";
+    const retryHeading = document.createElement("h3");
+    const retryHint = document.createElement("p");
+    const retryButton = document.createElement("button");
+    retryHeading.textContent = record.status === "needs_contact" ? "联系人已补充？" : "失败记录处理";
+    retryHint.textContent = record.status === "needs_contact"
+      ? "请先在 CRM 补充有效邮箱或 LinkedIn，再重新排期；调度器在线后会重新读取 CRM。"
+      : "确认失败原因已处理后，可手动重新排期生成消息。";
+    retryHint.className = "muted";
+    retryButton.type = "button";
+    retryButton.textContent = record.status === "needs_contact" ? "重新排期重试" : "重新生成消息";
+    retryButton.addEventListener("click", async () => {
+      retryButton.disabled = true;
+      setStatus("正在重新排期…", "running");
+      try {
+        const result = await request<{
+          lead_id: string;
+          status: string;
+          next_action_at: string;
+        }>(`/api/polling/leads/${encodeURIComponent(record.lead_id)}/retry`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ actor: "review-ui" }),
+        });
+        record.status = result.status;
+        record.next_action_at = result.next_action_at;
+        record.last_error = null;
+        const refreshed = await request<LeadDetail>(
+          `/api/polling/leads/${encodeURIComponent(record.lead_id)}`,
+        );
+        renderQueueDetail(record, refreshed);
+        const active = recordList.querySelector<HTMLElement>(".record-item.active");
+        const statusBadge = active?.querySelector<HTMLElement>(".badge");
+        if (statusBadge) {
+          statusBadge.textContent = queueStatusLabels[result.status] || result.status;
+          statusBadge.className = `badge ${result.status}`;
+        }
+        setStatus("已重新排期，等待调度器处理", "success");
+        loadDashboard().catch(() => undefined);
+      } catch (error) {
+        retryButton.disabled = false;
+        showError(error);
+      }
+    });
+    retrySection.append(retryHeading, retryHint, retryButton);
+    reasonPanel.append(retrySection);
   }
   reasonPanel.append(
     block("分类理由", record.classification_reason),
