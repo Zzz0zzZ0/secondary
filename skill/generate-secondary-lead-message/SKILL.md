@@ -61,6 +61,19 @@ The decision rules in this section take precedence over all later content restri
 12. Apply the lifecycle and cadence rules below, then draft the message using the safe-response rules and approved facts in [references/business-facts.md](references/business-facts.md).
 13. Verify the draft and return only valid JSON matching [references/output-schema.md](references/output-schema.md).
 
+The input field `message_route` is authoritative. Do not replace it with a
+generic `UNKNOWN_DEMAND` response:
+
+- `recommender_thanks`: thank the current contact and, only when supported,
+  request an introduction, forwarding, or reminder. Never ask the recommender
+  about products, specifications, quantities, applications, or purchasing needs.
+- `referred_intro`: mention the verified recommender and make a concise first
+  introduction to the current contact.
+- `qualification`: use one conservative, low-effort qualification question.
+- `referral_review`: return `no_message` with a reason that the referral role
+  must be confirmed; do not draft a normal sales message.
+- `default`: follow the existing subtype-specific rules below.
+
 ## Language and Channel
 
 Choose language in this order:

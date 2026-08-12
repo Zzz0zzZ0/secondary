@@ -1,4 +1,5 @@
 import copy
+import re
 from typing import Any, Dict, List, Optional
 
 from .sender_identity import resolve_sender_identity
@@ -9,6 +10,45 @@ COMPANY_CONTEXT_WARNINGS = {
     "COMPANY_CONTEXT_MISSING",
     "COMPANY_CONTEXT_THIN",
 }
+MESSAGE_ROUTES = {
+    "recommender_thanks",
+    "referred_intro",
+    "qualification",
+    "referral_review",
+    "default",
+}
+
+
+def message_route(
+    source_record: Dict[str, Any],
+    classification: Optional[Dict[str, Any]],
+) -> str:
+    """Choose the smallest safe message task without changing CRM lead type."""
+    lead = source_record.get("lead") or {}
+    lead_type = classification.get("lead_type") if isinstance(classification, dict) else None
+    raw_type = lead.get("raw_type")
+    if raw_type is None:
+        raw_type = lead.get("subtype")
+    raw_types = raw_type if isinstance(raw_type, list) else [raw_type]
+    referred = lead_type == "referred" or any(
+        item in {"RECOMMEND", "RECOMMENDED", "（被）推荐"}
+        for item in raw_types
+    )
+    relationship = (
+        classification.get("referral_relationship")
+        if isinstance(classification, dict)
+        else source_record.get("referral_context")
+    )
+    if referred:
+        role = relationship.get("current_contact_role") if isinstance(relationship, dict) else None
+        if role == "recommender":
+            return "recommender_thanks"
+        if role == "referred":
+            return "referred_intro"
+        return "referral_review"
+    if lead_type in {"no_current_demand", "below_moq"}:
+        return "default"
+    return "qualification"
 
 
 def _contains_simplified_chinese(value: str) -> bool:
@@ -64,6 +104,7 @@ def prepare_message_record(
     record["review_context"] = {
         "crm_internal_note": internal_note,
     }
+    record["message_route"] = message_route(source_record, classification)
     if isinstance(classification, dict):
         assessment = classification.get("message_evidence")
         if isinstance(assessment, dict):
@@ -219,6 +260,12 @@ def validation_errors(
         errors.append("判断理由必须使用简体中文")
     if candidate.get("review_required") is not True:
         errors.append("review_required未明确设为true")
+    route = message_route(crm_input, None)
+    explicit_route = crm_input.get("message_route")
+    if explicit_route in MESSAGE_ROUTES:
+        route = explicit_route
+    if route not in MESSAGE_ROUTES:
+        errors.append("message_route缺失或不合法")
     input_warnings = (
         crm_input.get("warnings")
         if isinstance(crm_input.get("warnings"), list)
@@ -254,6 +301,19 @@ def validation_errors(
             or content.get("subject_zh") is not None
         ):
             errors.append("LinkedIn消息不应包含主题")
+        if route == "referral_review":
+            errors.append("推荐关系未确认时不得生成客户消息")
+        if route == "recommender_thanks":
+            body_text = " ".join(
+                str(content.get(field) or "")
+                for field in ("body", "body_zh")
+            ).casefold()
+            if re.search(
+                r"(what|which|could you share|please share|current|specific)"
+                r"[^.?!]{0,80}(product|material|specification|quantity|requirement|sourcing|purchasing|application|需求|产品|规格|数量)",
+                body_text,
+            ):
+                errors.append("推荐人消息不得询问产品需求")
     elif any(
         content.get(key) is not None
         for key in ("subject", "subject_zh", "body", "body_zh")

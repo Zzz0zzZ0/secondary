@@ -171,6 +171,9 @@ const reviewChannelFilter = document.querySelector<HTMLSelectElement>(
 const reviewSalesFilter = document.querySelector<HTMLSelectElement>(
   "#review-sales-filter",
 )!;
+const reviewRouteFilter = document.querySelector<HTMLSelectElement>(
+  "#review-route-filter",
+)!;
 let pendingReviewAll: ReviewMessage[] = [];
 const outboxQueueButton = document.querySelector<HTMLButtonElement>(
   "#outbox-queue-button",
@@ -256,6 +259,13 @@ const warningLabels: Record<string, string> = {
   SALES_NAME_TRANSLITERATED: "销售姓名已按拼音转换",
   SALES_NAME_TRANSLITERATION_UNCERTAIN: "销售姓名拼音需人工核对",
   DO_NOT_CONTACT: "客户明确要求不要联系",
+};
+const messageRouteLabels: Record<string, string> = {
+  recommender_thanks: "推荐人待感谢",
+  referred_intro: "被推荐人待联系",
+  qualification: "需求待确认",
+  referral_review: "推荐关系待核对",
+  default: "按原分类处理",
 };
 const leadTypeLabels: Record<string, string> = {
   no_current_demand: "暂无需求",
@@ -873,6 +883,7 @@ function renderReviewMessageDetail(message: ReviewMessage) {
     ["收件地址", message.recipient_original],
     ["销售", sales.name],
     ["渠道", message.channel === "email" ? "邮件" : "LinkedIn"],
+    ["处理路由", messageRouteLabels[snapshot.message_route] || snapshot.message_route],
     ["消息版本", message.version],
     ["生成时间", formatDateTime(message.created_at)],
   ].forEach(([key, value]) => crmFields.append(field(String(key), value)));
@@ -886,6 +897,14 @@ function renderReviewMessageDetail(message: ReviewMessage) {
     block("Hermes 判断理由", output.reason),
     block("内部提醒", warningText(output.warnings)),
   );
+  if (snapshot.message_route === "referral_review") {
+    crmPanel.append(
+      block(
+        "人工动作",
+        "推荐关系方向未确认。请先核对 CRM 原文；当前消息禁止批准发送。",
+      ),
+    );
+  }
 
   const reviewPanel = document.createElement("div");
   reviewPanel.className = "panel output-panel";
@@ -955,6 +974,10 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   approveButton.className = "approve";
   rejectButton.className = "reject";
   actions.append(saveButton, regenerateButton, approveButton, rejectButton);
+  if (snapshot.message_route === "referral_review") {
+    approveButton.disabled = true;
+    approveButton.title = "推荐关系未核对，禁止批准发送";
+  }
 
   const buttons = [
     saveButton,
@@ -964,7 +987,9 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   ];
   const setBusy = (busy: boolean) => {
     buttons.forEach((button) => {
-      button.disabled = busy;
+      button.disabled = busy || (
+        button === approveButton && snapshot.message_route === "referral_review"
+      );
     });
   };
   const editPayload = () => ({
@@ -1112,6 +1137,7 @@ function renderReviewMessages(records: ReviewMessage[]) {
   records.forEach((message, index) => {
     const company = message.crm_snapshot?.company?.name;
     const contact = message.crm_snapshot?.contact?.name;
+    const route = message.crm_snapshot?.message_route || "default";
     const button = document.createElement("button");
     button.type = "button";
     button.className = "record-item";
@@ -1124,7 +1150,7 @@ function renderReviewMessages(records: ReviewMessage[]) {
     button.append(
       title,
       subtitle,
-      badge(message.edited_output ? "已修改" : "待审", "generated"),
+      badge(messageRouteLabels[route] || route, route),
     );
     button.addEventListener("click", () => {
       recordList
@@ -1524,6 +1550,7 @@ async function loadReviewMessages() {
     );
     pendingReviewAll = result.records;
     refreshSalesFilterOptions(pendingReviewAll);
+    refreshRouteFilterOptions(pendingReviewAll);
     applyReviewFilters();
     const filtered = filterReviewMessages(pendingReviewAll);
     const total = pendingReviewAll.length;
@@ -1545,11 +1572,15 @@ async function loadReviewMessages() {
 function filterReviewMessages(records: ReviewMessage[]): ReviewMessage[] {
   const channel = reviewChannelFilter.value;
   const sales = reviewSalesFilter.value;
+  const route = reviewRouteFilter.value;
   return records.filter((message) => {
     if (channel && message.channel !== channel) return false;
     if (sales) {
       const name = (message.crm_snapshot?.sales || {}).name;
       if (name !== sales) return false;
+    }
+    if (route && (message.crm_snapshot?.message_route || "default") !== route) {
+      return false;
     }
     return true;
   });
@@ -1579,6 +1610,26 @@ function refreshSalesFilterOptions(records: ReviewMessage[]): void {
   } else {
     reviewSalesFilter.value = "";
   }
+}
+
+function refreshRouteFilterOptions(records: ReviewMessage[]): void {
+  const current = reviewRouteFilter.value;
+  const routes = new Set<string>();
+  records.forEach((message) => {
+    routes.add(String(message.crm_snapshot?.message_route || "default"));
+  });
+  reviewRouteFilter.replaceChildren();
+  const allOption = document.createElement("option");
+  allOption.value = "";
+  allOption.textContent = "全部";
+  reviewRouteFilter.append(allOption);
+  [...routes].sort().forEach((route) => {
+    const option = document.createElement("option");
+    option.value = route;
+    option.textContent = messageRouteLabels[route] || route;
+    reviewRouteFilter.append(option);
+  });
+  reviewRouteFilter.value = current && routes.has(current) ? current : "";
 }
 
 function applyReviewFilters(): void {
@@ -1650,6 +1701,19 @@ reviewChannelFilter.addEventListener("change", () => {
 });
 
 reviewSalesFilter.addEventListener("change", () => {
+  if (!pendingReviewAll.length) return;
+  applyReviewFilters();
+  const total = pendingReviewAll.length;
+  const filtered = filterReviewMessages(pendingReviewAll);
+  setStatus(
+    filtered.length === total
+      ? `已加载 ${total} 条待审消息`
+      : `已加载 ${total} 条待审消息，过滤后显示 ${filtered.length} 条`,
+    filtered.length ? "success" : "",
+  );
+});
+
+reviewRouteFilter.addEventListener("change", () => {
   if (!pendingReviewAll.length) return;
   applyReviewFilters();
   const total = pendingReviewAll.length;

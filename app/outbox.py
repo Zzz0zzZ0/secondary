@@ -10,6 +10,7 @@ from .db import connect
 from .secondary.message_policy import validation_errors
 from .secondary.sender_identity import resolve_sender_identity
 from .secondary_signals import notify_secondary_outbox_event
+from .secondary.message_policy import message_route
 
 
 EMAIL_PATTERN = re.compile(r"^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$")
@@ -157,6 +158,8 @@ def _review_message(row):
     if row is None:
         return None
     effective_output = row[8] or row[7]
+    crm_snapshot = dict(row[6] or {})
+    crm_snapshot["message_route"] = message_route(crm_snapshot, None)
     return {
         "id": str(row[0]),
         "run_id": row[1],
@@ -164,7 +167,7 @@ def _review_message(row):
         "channel": row[3],
         "version": row[4],
         "recipient_original": row[5],
-        "crm_snapshot": row[6],
+        "crm_snapshot": crm_snapshot,
         "original_output": row[7],
         "edited_output": row[8],
         "effective_output": effective_output,
@@ -260,7 +263,9 @@ def save_message_edit(message_id, subject, body):
 def replace_message_draft(message_id, output):
     with connect() as conn, conn.cursor() as cursor:
         row = _pending_message(cursor, message_id)
-        errors = validation_errors(output, row[3], str(row[1]))
+        crm_snapshot = dict(row[3] or {})
+        crm_snapshot["message_route"] = message_route(crm_snapshot, None)
+        errors = validation_errors(output, crm_snapshot, str(row[1]))
         if errors:
             raise RuntimeError(
                 "Regenerated message failed validation: " + "; ".join(errors)

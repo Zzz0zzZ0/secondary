@@ -32,6 +32,18 @@ Twenty CRM（只读）→ Hermes 判断与生成 → Review UI 人工审阅
 本地 Hermes 分类结果为：暂无需求、未知需求、（被）推荐、订量不够。当前阶段不写回
 CRM。
 
+二级线索模块只处理上述四类线索，不处理真正的 CRM `inquiry`。消息路由只有：
+
+| 路由 | 人工动作 |
+|---|---|
+| `qualification` | 确认产品方向、用途、规格或数量；一次只问一个低负担问题 |
+| `recommender_thanks` | 感谢推荐人；不得询问其产品需求 |
+| `referred_intro` | 联系被推荐人并说明已核实的推荐关系 |
+| `referral_review` | 推荐关系方向未确认，先人工核对；禁止批准发送 |
+
+有具体产品、数量、报价或资料请求的 CRM 证据不会在本模块内自动升级为询盘；只有 CRM
+后续将记录生命周期更新为 `inquiry`，才由其他流程处理。
+
 输出渠道自动确定：
 
 1. 有邮箱时生成 Email；
@@ -78,6 +90,30 @@ REVIEW_UI_HOST=127.0.0.1 ./bin/start-review-ui
 ```
 
 随后访问 `http://127.0.0.1:8000`。停止前台进程使用 `Ctrl-C`；不会删除本地 SQLite 或运行日志。
+
+### 重新生成旧待审核消息
+
+规则调整后，可先预览受影响消息，再执行人工触发的重生成。命令只更新
+`pending_review` 草稿，不批准、不发送，也不写回 CRM：
+
+```bash
+set -a; source config/local.env; set +a
+scripts/run_refresh_pending_review_messages.sh --max 1000 --dry-run
+scripts/run_refresh_pending_review_messages.sh --max 1000 --workers 4
+```
+
+如果旧消息曾因 Hermes 代理问题使用过兜底草稿，修复代理配置后使用
+`--retry-fallbacks` 强制重新调用 Hermes：
+
+```bash
+NO_PROXY='127.0.0.1,localhost' \
+no_proxy='127.0.0.1,localhost' \
+scripts/run_refresh_pending_review_messages.sh \
+  --max 1000 --workers 4 --retry-fallbacks
+```
+
+Hermes 调用环境会自动移除 httpx 在本机代理解析中容易误判的 `::1` 和 `::1/128`。
+若生成仍失败，脚本会保留失败并记录原因，不会再次静默覆盖成兜底草稿。
 
 ## 二级线索调度
 

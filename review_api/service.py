@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.outbox import get_review_message, replace_message_draft
-from app.secondary.message_policy import validation_errors
+from app.secondary.message_policy import message_route, validation_errors
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -18,6 +18,19 @@ DEFAULT_RUNS_DIR = PROJECT_DIR / "outputs" / "review-runs"
 DEFAULT_REGENERATION_DIR = (
     PROJECT_DIR / "outputs" / "review-regenerations"
 )
+
+
+def _hermes_environment() -> Dict[str, str]:
+    """Copy the process environment and remove httpx-hostile IPv6 bypass tokens."""
+    env = os.environ.copy()
+    for key in ("NO_PROXY", "no_proxy"):
+        value = env.get(key)
+        if value:
+            tokens = [token.strip() for token in value.split(",")]
+            env[key] = ",".join(
+                token for token in tokens if token not in {"::1", "::1/128"}
+            )
+    return env
 
 
 def _read_json(path: Path) -> Optional[Any]:
@@ -58,7 +71,7 @@ def pipeline_environment(
     run_root: Path,
     input_file: Optional[Path] = None,
 ) -> Dict[str, str]:
-    env = os.environ.copy()
+    env = _hermes_environment()
     env.pop("TWENTY_OUTPUT_CHANNEL", None)
     env.pop("HERMES_HUMAN_REVIEW_INSTRUCTION", None)
     env.pop("HERMES_REVIEW_CURRENT_DRAFT", None)
@@ -108,9 +121,11 @@ def regenerate_review_message(
     run_root.mkdir(parents=True)
     run_root.chmod(0o700)
     input_file = run_root / "selected-inputs.json"
+    crm_snapshot = json.loads(json.dumps(message["crm_snapshot"]))
+    crm_snapshot["message_route"] = message_route(crm_snapshot, None)
     input_file.write_text(
         json.dumps(
-            [message["crm_snapshot"]],
+            [crm_snapshot],
             ensure_ascii=False,
             indent=2,
         )

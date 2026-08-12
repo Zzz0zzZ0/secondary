@@ -1,4 +1,5 @@
 import copy
+import os
 import unittest
 from pathlib import Path
 
@@ -6,10 +7,25 @@ from app.secondary.classification import validate_classification
 from app.secondary.message_policy import MANUAL_CONFIRMATION_WARNING
 from app.secondary.message_policy import prepare_message_record
 from app.secondary.message_policy import validation_errors
+from app.secondary.message_policy import message_route
 from app.secondary_scheduler import _needs_policy_reclassification
+from review_api.service import _hermes_environment
 
 
 class SecondaryReferralTest(unittest.TestCase):
+    def test_hermes_environment_removes_ipv6_proxy_bypass_tokens(self):
+        old = os.environ.get("NO_PROXY")
+        try:
+            os.environ["NO_PROXY"] = "127.0.0.1,::1,localhost,::1/128"
+            self.assertEqual(
+                _hermes_environment()["NO_PROXY"], "127.0.0.1,localhost"
+            )
+        finally:
+            if old is None:
+                os.environ.pop("NO_PROXY", None)
+            else:
+                os.environ["NO_PROXY"] = old
+
     def _candidate(self, role, name, quote):
         related = [{"name": name, "evidence_quote": quote}]
         return {
@@ -61,6 +77,7 @@ class SecondaryReferralTest(unittest.TestCase):
         )
         self.assertEqual(prepared["lead"]["referred_contacts"], "Florian Laux")
         self.assertNotIn("recommended_by", prepared["lead"])
+        self.assertEqual(prepared["message_route"], "recommender_thanks")
 
     def test_recommender_normalizes_legacy_recommended_by(self):
         note = "Mario Vicari 告知同事 Lucchi 会负责跟进。"
@@ -118,6 +135,61 @@ class SecondaryReferralTest(unittest.TestCase):
             "referred",
         )
         self.assertEqual(prepared["lead"]["recommended_by"], "Sujal Khatiwada")
+        self.assertEqual(prepared["message_route"], "referred_intro")
+
+    def test_sufficient_evidence_on_secondary_lead_routes_to_qualification(self):
+        prepared = prepare_message_record(
+            self._record("Customer", "Customer requested a quote for CCM 90%."),
+            {
+                "lead_type": "unknown_demand",
+                "message_evidence": {"status": "sufficient"},
+            },
+        )
+        self.assertEqual(prepared["message_route"], "qualification")
+
+    def test_secondary_lead_evidence_does_not_upgrade_to_inquiry(self):
+        prepared = prepare_message_record(
+            {
+                **self._record("Customer", "客户要求报价。"),
+                "lead": {"id": "lead-1", "type": "lead", "raw_type": "未知需求"},
+            },
+            {"lead_type": "unknown_demand", "message_evidence": {"status": "sufficient"}},
+        )
+        self.assertEqual(prepared["message_route"], "qualification")
+
+    def test_missing_referral_role_routes_to_review(self):
+        prepared = prepare_message_record(
+            self._record("Customer", "推荐采购经理 Florian Laux。"),
+            {"lead_type": "referred", "message_evidence": {"status": "sufficient"}},
+        )
+        self.assertEqual(prepared["message_route"], "referral_review")
+
+    def test_recommender_cannot_ask_product_need(self):
+        crm_input = {
+            "lead": {"id": "lead-1"},
+            "output": {"type": "linkedin"},
+            "message_route": "recommender_thanks",
+        }
+        candidate = {
+            "decision": "generated",
+            "lead_id": "lead-1",
+            "output_type": "linkedin",
+            "content": {
+                "subject": None,
+                "subject_zh": None,
+                "body": "Thank you for the referral. What products are you sourcing?",
+                "body_zh": "感谢您的推荐。您正在采购哪些产品？",
+            },
+            "message_goal": "感谢推荐",
+            "information_requested": [],
+            "warnings": [],
+            "reason": "感谢推荐并避免询问产品需求。",
+            "review_required": True,
+        }
+        self.assertIn(
+            "推荐人消息不得询问产品需求",
+            validation_errors(candidate, crm_input, "lead-1"),
+        )
 
     def test_grounded_referral_normalizes_insufficient_message_evidence(self):
         note = "Nathan 由 Sujal Khatiwada 推荐。"
