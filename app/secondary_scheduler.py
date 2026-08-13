@@ -366,8 +366,6 @@ class SecondaryLeadScheduler:
                 "TWENTY_AFTER_ID": cursor_id,
                 "TWENTY_RECORD_ID": record_id,
                 "OUTBOX_AUTO_IMPORT": "false",
-                "GMAIL_SEND_ENABLED": "false",
-                "EMAIL_LIVE_SEND_ENABLED": "false",
             }
         )
         return environment

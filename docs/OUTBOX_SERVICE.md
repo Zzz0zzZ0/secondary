@@ -29,10 +29,6 @@ Apply migrations first:
 ./bin/twenty-hermes migrate
 ```
 
-Before applying migration `006`, stop any legacy `send-once` or
-`start-outbox-reaper` process that is still running. Restart the Outbox API
-after the migration.
-
 Generate local API tokens once, then run:
 
 ```bash

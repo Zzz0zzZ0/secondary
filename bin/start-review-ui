@@ -51,8 +51,6 @@ if [[ ! -f "$WEB_DIR/dist/index.html" ]] \
 fi
 
 export OUTBOX_AUTO_IMPORT=false
-export GMAIL_SEND_ENABLED=false
-export EMAIL_LIVE_SEND_ENABLED=false
 
 "$PYTHON_BIN" -m uvicorn review_api.main:app --app-dir "$PROJECT_DIR" --host "$REVIEW_BIND_HOST" --port "$PORT" &
 SERVER_PID="$!"

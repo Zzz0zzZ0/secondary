@@ -235,8 +235,6 @@ class MessageJobProcessor:
                     "HERMES_POLL_OUTBOX_AUTO_IMPORT",
                     "false",
                 ).lower(),
-                "GMAIL_SEND_ENABLED": "false",
-                "EMAIL_LIVE_SEND_ENABLED": "false",
             }
         )
         return environment

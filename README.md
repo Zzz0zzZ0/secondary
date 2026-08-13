@@ -70,8 +70,6 @@ REVIEW_UI_HOST=127.0.0.1 ./bin/start-review-ui
 
 ```dotenv
 OUTBOX_AUTO_IMPORT=false
-GMAIL_SEND_ENABLED=false
-EMAIL_LIVE_SEND_ENABLED=false
 ```
 
 因此当前审阅测试不需要启动下游发信消费者；Review UI 启动时仍会执行 Outbox 数据库预检。
@@ -155,12 +153,12 @@ PostgreSQL，输出到 `outputs/runtime-reports/`。可在 Review UI 点击“�
 ## Outbox 链路
 
 ```text
-Review/Approval → Outbox → Gmail 或 LinkedIn 消费者
+Review/Approval → Outbox → 下游渠道消费者
 ```
 
 Outbox 使用独立 PostgreSQL 的 `sales_automation` schema。批准和写入
 `delivery_outbox` 在同一事务中完成；下游消费者通过 Outbox HTTP API 领取任务，
-无需直接访问数据库。同事接入发信消费者时参照
+无需直接访问数据库。接入邮件、LinkedIn 或其他渠道消费者时参照
 [`docs/OUTBOX_SENDER_QUICKSTART_CN.md`](docs/OUTBOX_SENDER_QUICKSTART_CN.md)。
 
 ## 完整链路配置
@@ -176,52 +174,14 @@ Outbox 使用独立 PostgreSQL 的 `sales_automation` schema。批准和写入
 1. `1) Configure connection`：配置只读 Twenty 和独立可写 Outbox 数据库；
 2. `8) Install Python dependencies`；
 3. `9) Initialize/update Outbox database`；
-4. `12) Authorize Gmail send-only access`；
-5. `5) Run complete CRM → Hermes pipeline`。
+4. `5) Run complete CRM → Hermes pipeline`。
 
 数据库密码不写入 `config/local.env`。本机测试可从 macOS 钥匙串服务
 `twenty-hermes-outbox` 读取，未找到时才提示输入。生产环境建议给 Outbox 使用独立数据库和最小权限账号。
 
-## Gmail OAuth
-
-在 Google Cloud 中创建 Desktop app OAuth client，启用 Gmail API，下载 JSON 到：
-
-```text
-~/.config/twenty-hermes/credentials/gmail-client.json
-```
-
-授权只请求 `gmail.send`。Token 保存为同目录的 `gmail-token.json`，权限为 `0600`。
-程序不申请读取收件箱权限。
-
-## 审批与安全发送（后续阶段）
-
-运行完生成流程后：
-
-1. `10) List review messages and Outbox`；
-2. 用 `show` 命令或 HTML 报告检查正文；
-3. `11) Approve one email and enqueue it`；
-4. `13) Preview next Gmail delivery (no send)`；
-5. 在 `config/local.env` 中将 `GMAIL_SEND_ENABLED=false` 改为 `true`；
-6. `14) Send one Gmail delivery`。
-
-默认安全配置：
-
-```dotenv
-EMAIL_SEND_MODE=redirect
-EMAIL_TEST_RECIPIENT=你的Gmail地址
-GMAIL_SEND_ENABLED=false
-EMAIL_LIVE_SEND_ENABLED=false
-```
-
-`redirect` 会把邮件只发到测试 Gmail，并在主题中标记原客户地址。真实发送必须同时设置：
-
-```dotenv
-EMAIL_SEND_MODE=live
-GMAIL_SEND_ENABLED=true
-EMAIL_LIVE_SEND_ENABLED=true
-```
-
-不要在首轮测试中开启 `live`。
+审核通过后，系统只把任务写入 Outbox；实际发送由独立的下游渠道消费者负责。
+消费者协议、幂等键和失败处理见
+[`docs/OUTBOX_DOWNSTREAM_INTEGRATION_GUIDE_CN.md`](docs/OUTBOX_DOWNSTREAM_INTEGRATION_GUIDE_CN.md)。
 
 ## 命令行方式
 
@@ -242,7 +202,7 @@ EMAIL_LIVE_SEND_ENABLED=true
 
 ## Outbox HTTP 服务
 
-下游消费者无需直接连接 PostgreSQL，可通过独立 FastAPI 服务领取任务、续租并报告
+下游消费者无需直接连接 PostgreSQL，可通过独立 FastAPI 服务领取任务并报告
 成功或失败。服务支持邮件和 LinkedIn 路由，消费者使用按渠道/provider 限定的 Bearer
 Token。面向消费者开发者的中文说明见
 [`docs/OUTBOX_DOWNSTREAM_INTEGRATION_GUIDE_CN.md`](docs/OUTBOX_DOWNSTREAM_INTEGRATION_GUIDE_CN.md)，
@@ -260,7 +220,7 @@ Token。面向消费者开发者的中文说明见
 - HTTP 429/5xx：按 1、5、30、120 分钟退避；
 - OAuth 401/403：`failed`，不盲目重试；
 - 请求提交后的连接超时：`unknown`，必须人工核查，避免重复发送；
-- Worker 中断留下 `sending`：不自动重置，先检查 Gmail 后人工处理。
+- Worker 中断留下 `sending`：不自动重置，先检查对应渠道平台后人工处理。
 
 Twenty 连接始终执行 `BEGIN READ ONLY`，不会写回 CRM。当前模块边界见
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，轮询与业务验证规则见

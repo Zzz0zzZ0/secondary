@@ -82,8 +82,6 @@ def pipeline_environment(
             "TWENTY_HERMES_RUNS_DIR": str(run_root),
             "TWENTY_HERMES_REPORTS_DIR": str(run_root / "reports"),
             "OUTBOX_AUTO_IMPORT": "false",
-            "GMAIL_SEND_ENABLED": "false",
-            "EMAIL_LIVE_SEND_ENABLED": "false",
         }
     )
     if input_file is not None:

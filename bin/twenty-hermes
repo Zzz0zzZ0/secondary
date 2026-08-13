@@ -27,7 +27,7 @@ prompt_value() {
 
 configure() {
   local db_host db_port db_name db_user db_sslmode workspace_schema export_limit
-  local outbox_host outbox_port outbox_name outbox_user outbox_sslmode test_recipient
+  local outbox_host outbox_port outbox_name outbox_user outbox_sslmode
   prompt_value db_host "Twenty database host" "${TWENTY_DB_HOST:-192.168.112.72}"
   prompt_value db_port "PostgreSQL port" "${TWENTY_DB_PORT:-5432}"
   prompt_value db_name "Database name" "${TWENTY_DB_NAME:-default}"
@@ -40,7 +40,6 @@ configure() {
   prompt_value outbox_name "Outbox database name" "${OUTBOX_DB_NAME:-sales_automation}"
   prompt_value outbox_user "Outbox database user" "${OUTBOX_DB_USER:-sales_automation}"
   prompt_value outbox_sslmode "Outbox SSL mode" "${OUTBOX_DB_SSLMODE:-prefer}"
-  prompt_value test_recipient "Gmail redirect test recipient" "${EMAIL_TEST_RECIPIENT:-}"
 
   umask 077
   {
@@ -63,13 +62,7 @@ configure() {
     printf 'OUTBOX_DB_SSLMODE=%q\n' "$outbox_sslmode"
     printf 'OUTBOX_KEYCHAIN_SERVICE=%q\n' "twenty-hermes-outbox"
     printf 'OUTBOX_AUTO_IMPORT=%q\n' "true"
-    printf 'EMAIL_SEND_MODE=%q\n' "redirect"
-    printf 'EMAIL_TEST_RECIPIENT=%q\n' "$test_recipient"
-    printf 'GMAIL_SEND_ENABLED=%q\n' "false"
-    printf 'EMAIL_LIVE_SEND_ENABLED=%q\n' "false"
     printf 'EMAIL_CONTACT_COOLDOWN_HOURS=%q\n' "24"
-    printf 'GMAIL_HTTPS_PROXY=%q\n' "http://127.0.0.1:12000"
-    printf 'GMAIL_API_ENDPOINT=%q\n' "https://www.googleapis.com/gmail/v1/users/me/messages/send"
   } >"$CONFIG_PATH"
   chmod 600 "$CONFIG_PATH"
   printf 'Configuration saved to %s (database password was not stored).\n' "$CONFIG_PATH"
@@ -132,10 +125,6 @@ outbox_approve() {
   [[ -z "$subject" ]] || args+=(--subject "$subject")
   [[ -z "$body_file" ]] || args+=(--body-file "$body_file")
   python_cli "${args[@]}"
-}
-
-gmail_auth() {
-  python_cli gmail-auth
 }
 
 ensure_config() {
@@ -238,8 +227,7 @@ menu() {
     printf '9) Initialize/update Outbox database\n'
     printf '10) List review messages and Outbox\n'
     printf '11) Approve one message and enqueue it\n'
-    printf '12) Authorize Gmail send-only access\n'
-    printf '13) Compare CRM and Skill product catalogs\n'
+    printf '12) Compare CRM and Skill product catalogs\n'
     printf '0) Exit\n'
     read -r -p 'Select: ' menu_choice
     case "$menu_choice" in
@@ -254,8 +242,7 @@ menu() {
       9) outbox_migrate ;;
       10) outbox_list ;;
       11) outbox_approve ;;
-      12) gmail_auth ;;
-      13) compare_products ;;
+      12) compare_products ;;
       0) return 0 ;;
       *) printf 'Unknown selection.\n' ;;
     esac
@@ -280,9 +267,8 @@ case "${1:-menu}" in
   queue) outbox_list ;;
   approve) shift; prompt_outbox_password; python_cli approve "$@" ;;
   show) shift; prompt_outbox_password; python_cli show "$@" ;;
-  gmail-auth) gmail_auth ;;
   *)
-    printf 'Usage: %s [menu|configure|check|discover|export|products|run|report [RUN_DIR]|open|setup|migrate|queue|show ID|approve ...|gmail-auth]\n' "$0" >&2
+    printf 'Usage: %s [menu|configure|check|discover|export|products|run|report [RUN_DIR]|open|setup|migrate|queue|show ID|approve ...]\n' "$0" >&2
     exit 2
     ;;
 esac

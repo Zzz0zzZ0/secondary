@@ -80,12 +80,7 @@ CRM 全程只读，分类结果和调度时间只保存在本地 SQLite。
 - `sent`：以实际发送时间计算下一次动作；
 - 未知需求和被推荐联系人成功发送两次后暂停短周期跟进。
 
-真实发送仍需要单独启用消费者和发送开关；调度器始终强制：
-
-```dotenv
-GMAIL_SEND_ENABLED=false
-EMAIL_LIVE_SEND_ENABLED=false
-```
+真实发送由 Outbox 下游消费者负责；调度器只生成和排队消息，不直接调用发送平台。
 
 `config/local.env` 提供人工审阅的首次启动默认值：
 

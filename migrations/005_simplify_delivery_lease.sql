@@ -1,4 +1,3 @@
--- Stop legacy send-once and outbox-reaper processes before applying this migration.
 DROP INDEX IF EXISTS sales_automation.delivery_outbox_worker_lease_idx;
 
 ALTER TABLE sales_automation.delivery_outbox

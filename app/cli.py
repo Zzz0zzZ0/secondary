@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 
 from .db import apply_migrations
-from .gmail_sender import authorize
 from .outbox import (
     approve_message,
     get_message,
@@ -24,7 +23,7 @@ def print_rows(rows):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Twenty → Hermes → Outbox → Gmail")
+    parser = argparse.ArgumentParser(description="Twenty → Hermes → Outbox")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate")
     import_parser = sub.add_parser("import-run")
@@ -42,7 +41,6 @@ def main(argv=None):
     approve_parser.add_argument("--yes", action="store_true")
     outbox_parser = sub.add_parser("list-outbox")
     outbox_parser.add_argument("--limit", type=int, default=20)
-    sub.add_parser("gmail-auth")
     sub.add_parser("outbox-preflight")
     args = parser.parse_args(argv)
 
@@ -73,8 +71,6 @@ def main(argv=None):
         print(f"Approved and queued: {outbox_id}")
     elif args.command == "list-outbox":
         print_rows(list_outbox(args.limit))
-    elif args.command == "gmail-auth":
-        print(f"Token saved: {authorize()}")
     elif args.command == "outbox-preflight":
         print(json.dumps(outbox_preflight()))
     return 0
