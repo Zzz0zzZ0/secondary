@@ -14,6 +14,7 @@ MESSAGE_ROUTES = {
     "recommender_thanks",
     "referred_intro",
     "qualification",
+    "conversation_follow_up",
     "referral_review",
     "default",
 }
@@ -39,6 +40,16 @@ def message_route(
         if isinstance(classification, dict)
         else source_record.get("referral_context")
     )
+    follow_up = (
+        classification.get("sales_follow_up_context")
+        if isinstance(classification, dict)
+        else source_record.get("sales_follow_up_context")
+    )
+    if (
+        isinstance(follow_up, dict)
+        and follow_up.get("status") in {"sales_replied", "information_sent"}
+    ):
+        return "conversation_follow_up"
     if referred:
         role = relationship.get("current_contact_role") if isinstance(relationship, dict) else None
         if role == "recommender":
@@ -80,6 +91,16 @@ def generation_eligibility(
         isinstance(assessment, dict)
         and assessment.get("status") == "sufficient"
     )
+    follow_up = (
+        classification.get("sales_follow_up_context")
+        if isinstance(classification, dict)
+        else None
+    )
+    if (
+        isinstance(follow_up, dict)
+        and follow_up.get("status") in {"sales_replied", "information_sent"}
+    ):
+        has_explicit_crm_evidence = True
     reason_codes: List[str] = []
     if not has_reliable_follow_up:
         reason_codes.append("FOLLOW_UP_TIME_MISSING")
@@ -109,6 +130,9 @@ def prepare_message_record(
         assessment = classification.get("message_evidence")
         if isinstance(assessment, dict):
             record["crm_message_evidence"] = copy.deepcopy(assessment)
+        follow_up = classification.get("sales_follow_up_context")
+        if isinstance(follow_up, dict):
+            record["sales_follow_up_context"] = copy.deepcopy(follow_up)
         permission = classification.get("contact_permission")
         if isinstance(permission, dict):
             record["contact_permission"] = copy.deepcopy(permission)
@@ -314,6 +338,29 @@ def validation_errors(
                 body_text,
             ):
                 errors.append("推荐人消息不得询问产品需求")
+        if route == "conversation_follow_up":
+            context = crm_input.get("sales_follow_up_context") or {}
+            if context.get("status") not in {"sales_replied", "information_sent"}:
+                errors.append("简短跟进缺少已验证的销售动作")
+            if (
+                isinstance(information_requested, list)
+                and len(information_requested) > 1
+            ):
+                errors.append("简短跟进一次最多询问一个事项")
+            body_text = " ".join(
+                str(content.get(field) or "")
+                for field in ("subject", "body", "subject_zh", "body_zh")
+            ).casefold()
+            if any(
+                phrase in body_text
+                for phrase in (
+                    "your inquiry",
+                    "thank you for your interest",
+                    "您的询盘",
+                    "感谢您的关注",
+                )
+            ):
+                errors.append("简短跟进不得虚构客户询盘或兴趣")
     elif any(
         content.get(key) is not None
         for key in ("subject", "subject_zh", "body", "body_zh")

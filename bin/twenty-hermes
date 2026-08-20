@@ -53,7 +53,7 @@ configure() {
     printf 'TWENTY_OUTPUT_CHANNEL=%q\n' "email"
     printf 'TWENTY_HERMES_RUNS_DIR=%q\n' "$RUNS_DIR"
     printf 'TWENTY_HERMES_REPORTS_DIR=%q\n' "$REPORTS_DIR"
-    printf 'HERMES_COMMAND=%q\n' "/Users/acelerzbw/.local/bin/inquiry-trial"
+    printf 'HERMES_COMMAND=%q\n' "$HOME/.local/bin/hermes"
     printf 'HERMES_SKILL_DIR=%q\n' "$PROJECT_DIR/skill/generate-secondary-lead-message"
     printf 'OUTBOX_DB_HOST=%q\n' "$outbox_host"
     printf 'OUTBOX_DB_PORT=%q\n' "$outbox_port"

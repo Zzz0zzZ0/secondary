@@ -250,6 +250,7 @@ const warningLabels: Record<string, string> = {
   PRICE_FIELDS_INTENTIONALLY_EXCLUDED: "报价字段已按规则排除",
   RECENT_NO_CURRENT_DEMAND: "近期已确认暂无需求",
   FOLLOW_UP_TIMING_UNVERIFIED: "跟进时间尚未确认",
+  SALES_FOLLOW_UP_TIME_UNVERIFIED: "销售已回复，但跟进时间尚未确认",
   CRM_EVIDENCE_REQUIRES_MANUAL_CONFIRMATION: "CRM证据不足，必须人工确认",
   DOCUMENT_AVAILABILITY_UNVERIFIED: "资料是否可提供尚未确认",
   AVAILABILITY_REQUIRES_MANUAL_CONFIRMATION: "资料或产品可用性需人工确认",
@@ -264,6 +265,7 @@ const messageRouteLabels: Record<string, string> = {
   recommender_thanks: "推荐人待感谢",
   referred_intro: "被推荐人待联系",
   qualification: "需求待确认",
+  conversation_follow_up: "已沟通待跟进",
   referral_review: "推荐关系待核对",
   default: "按原分类处理",
 };

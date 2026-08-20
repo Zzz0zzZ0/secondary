@@ -16,6 +16,10 @@ The output must be one JSON object with exactly these semantic fields:
   - `customer_action_quote`: exact substring of `lead.internal_note` or `null`;
   - `business_detail_quote`: exact substring of `lead.internal_note` or `null`;
   - `reason`: non-empty Simplified Chinese string;
+- `sales_follow_up_context`: object containing:
+  - `status`: `none`, `sales_replied`, or `information_sent`;
+  - `evidence_quote`: exact substring of `lead.internal_note` when status is not
+    `none`, otherwise `null`;
 - `contact_permission`: object containing:
   - `status`: `allowed` or `do_not_contact`;
   - `evidence_quote`: exact substring of `lead.internal_note` for

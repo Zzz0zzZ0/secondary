@@ -68,6 +68,18 @@ Return a concise follow-up:
 
 Do not claim to attach or resend the document unless requested and actually available.
 
+## Salesperson Already Replied
+
+Input situation: `message_route=conversation_follow_up` and the classification
+stage supplies an exact CRM quote proving that the salesperson already replied.
+
+- Do not write a new introduction or call the previous exchange an inquiry.
+- Do not thank the customer for interest unless separate customer evidence proves it.
+- If the prior reply's content is unavailable, use a generic check-in and ask at
+  most whether any additional information would be helpful.
+- If timing is not verified, no customer message should have been requested;
+  return `no_message` with `FOLLOW_UP_TIMING_UNVERIFIED` if such an input appears.
+
 ## Recent No-Current-Demand
 
 Input situation: The customer recently said there is no purchasing demand and accepted a catalog for future reference.

@@ -71,7 +71,7 @@ class ClassificationRunner:
         input_path.chmod(0o600)
         command = self.environment.get(
             "HERMES_COMMAND",
-            "/Users/acelerzbw/.local/bin/inquiry-trial",
+            str(Path.home() / ".local" / "bin" / "hermes"),
         )
         if not os.access(command, os.X_OK):
             raise RuntimeError(f"Hermes command is not executable: {command}")

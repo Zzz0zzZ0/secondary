@@ -5,11 +5,8 @@ review_web/dist/
 config/local.env
 config/outbox-service.env
 config/outbox-docker.env
-outputs/runs/
-outputs/review-runs/
-outputs/review-regenerations/
-outputs/runtime-reports/
-outputs/poller/
+outputs/
+tertiary_trial/outputs/
 reports/latest.html
 tmp/
 __pycache__/

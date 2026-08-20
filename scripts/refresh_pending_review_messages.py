@@ -40,6 +40,10 @@ def instruction_for(route: str) -> str:
             "按 message_route=qualification 重写。当前记录仍是二级线索，不得写成实际询盘回复；"
             "用一个保守、低负担的问题确认产品方向、用途、规格或数量，禁止声称客户已经提出正式询盘。"
         ),
+        "conversation_follow_up": (
+            "按 message_route=conversation_follow_up 重写。销售已经回复或发送资料；只做简短跟进，"
+            "禁止重新介绍公司、声称客户提出询盘或感谢客户兴趣。最多问一个低负担问题，不得虚构此前回复内容。"
+        ),
     }[route]
 
 
@@ -72,7 +76,13 @@ def main(argv: list[str] | None = None) -> int:
         is_fallback = "本地代理暂不可用" in fallback_reason
         if args.retry_fallbacks and not is_fallback:
             continue
-        if route in {"qualification", "recommender_thanks", "referred_intro", "referral_review"}:
+        if route in {
+            "qualification",
+            "conversation_follow_up",
+            "recommender_thanks",
+            "referred_intro",
+            "referral_review",
+        }:
             if route == "qualification" and not args.retry_fallbacks:
                 continue
             # Preserve an existing human-edited draft on reruns; ambiguous
@@ -129,6 +139,13 @@ def main(argv: list[str] | None = None) -> int:
                 body = f"Hi {contact_name},\n\nThank you for recommending {related_name}. We have noted the introduction and appreciate your help.\n\nBest regards,\nAceler International"
                 body_zh = f"您好，{contact_name}：\n\n感谢您推荐 {related_name}。我们已记录这次引荐，非常感谢您的帮助。\n\n此致敬礼，\nAceler International"
                 subject = subject_zh = None
+            elif route == "conversation_follow_up":
+                sender = resolve_sender_identity((snapshot.get("sales") or {}).get("name")) or {}
+                sender_name = sender.get("display_name") or "Aceler International"
+                greeting = f"Hello {contact_name}," if contact_name else "Hello,"
+                body = f"{greeting}\n\nJust following up on our previous reply. Please let us know if any clarification would be helpful.\n\nBest regards,\n{sender_name}\nAceler International"
+                body_zh = f"{('您好，' + contact_name + '：') if contact_name else '您好：'}\n\n简单跟进一下我们此前的回复。如有任何需要进一步说明之处，请告诉我们。\n\n此致敬礼，\n{sender_name}\nAceler International"
+                subject, subject_zh = ("A brief follow-up", "简短跟进") if channel == "email" else (None, None)
             else:
                 sender = resolve_sender_identity((snapshot.get("sales") or {}).get("name")) or {}
                 sender_name = sender.get("display_name") or "Aceler International"
@@ -147,7 +164,13 @@ def main(argv: list[str] | None = None) -> int:
             replace_message_draft(message_id, {
                 "decision": "generated", "lead_id": lead_id, "output_type": channel,
                 "language": "English", "content": {"subject": subject, "subject_zh": subject_zh, "body": body, "body_zh": body_zh},
-                "message_goal": "感谢推荐并记录客户请求，待人工确认后跟进。" if route == "recommender_thanks" else "确认客户请求并在内部核实后跟进。",
+                "message_goal": (
+                    "感谢推荐并记录客户请求，待人工确认后跟进。"
+                    if route == "recommender_thanks"
+                    else "对销售此前回复做一次简短跟进。"
+                    if route == "conversation_follow_up"
+                    else "确认客户请求并在内部核实后跟进。"
+                ),
                 "information_requested": [], "warnings": warnings,
                 "reason": fallback_reason, "review_required": True,
             })

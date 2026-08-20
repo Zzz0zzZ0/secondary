@@ -350,7 +350,7 @@ pre { margin: 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; 
 .badge.no_message { color: #8b6110; background: #fff0ca; }
 .badge.cannot_generate, .badge.invalid { color: #993c3c; background: #fbe1e1; }
 .badge.referred_intro { color: #0f6654; background: #daf2e9; }
-.badge.recommender_thanks, .badge.qualification { color: #70500f; background: #fff0ca; }
+.badge.recommender_thanks, .badge.qualification, .badge.conversation_follow_up { color: #70500f; background: #fff0ca; }
 .badge.referral_review { color: #993c3c; background: #fbe1e1; }
 .hidden { display: none !important; }
 

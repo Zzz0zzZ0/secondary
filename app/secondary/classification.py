@@ -97,6 +97,30 @@ def validate_classification(
         "message_evidence.reason",
     )
 
+    follow_up = candidate.get("sales_follow_up_context")
+    if not isinstance(follow_up, dict):
+        raise RuntimeError("Classification sales_follow_up_context is missing")
+    follow_up_status = follow_up.get("status")
+    if follow_up_status not in {"none", "sales_replied", "information_sent"}:
+        raise RuntimeError("Classification sales_follow_up_context.status is invalid")
+    follow_up_quote = _optional_quote(
+        follow_up.get("evidence_quote"),
+        note,
+        "sales_follow_up_context.evidence_quote",
+    )
+    if follow_up_status == "none" and follow_up_quote is not None:
+        raise RuntimeError(
+            "Classification sales_follow_up_context.none cannot carry evidence"
+        )
+    if follow_up_status != "none" and follow_up_quote is None:
+        raise RuntimeError(
+            "Classification sales follow-up context must quote CRM text exactly"
+        )
+    candidate["sales_follow_up_context"] = {
+        "status": follow_up_status,
+        "evidence_quote": follow_up_quote,
+    }
+
     normalized_recommenders = _grounded_people(
         candidate.get("recommended_by"), note, "recommended_by"
     )

@@ -75,6 +75,22 @@ Assess message evidence separately from lead classification:
 Set `contact_permission.status` to `do_not_contact` only when an exact CRM quote
 explicitly asks not to be contacted. Otherwise use `allowed` and a null quote.
 
+Classify prior salesperson actions separately from customer actions in
+`sales_follow_up_context`:
+
+- use `sales_replied` only when the note clearly says the Aceler salesperson
+  already replied or contacted the current customer;
+- use `information_sent` only when the note clearly says the salesperson sent
+  information, a catalog, TDS, quotation material, or a similar document;
+- use `none` when the note is ambiguous, only labels the person, describes a
+  customer reply, or does not prove an outbound salesperson action;
+- for either non-`none` status, copy one exact supporting substring into
+  `evidence_quote`; never infer the action from `lastFollowUp` alone.
+
+The direction matters. A customer replying to the salesperson is not
+`sales_replied`. Do not turn a recorded salesperson reply into evidence that
+the customer made an inquiry or expressed interest.
+
 Use semantic judgment to identify whether `lead.internal_note` contains a pasted
 customer reply that directly addresses the Aceler salesperson by a name or
 familiar business name. When it does, return that name and the exact address

@@ -70,6 +70,16 @@ generic `UNKNOWN_DEMAND` response:
 - `referred_intro`: mention the verified recommender and make a concise first
   introduction to the current contact.
 - `qualification`: use one conservative, low-effort qualification question.
+- `conversation_follow_up`: the salesperson already replied or sent information.
+  Write only a concise follow-up to the prior outbound action. Do not repeat the
+  company introduction, invent an inquiry or customer interest, or ask more than
+  one low-effort question. When the evidence only proves that a reply was sent,
+  use a generic check-in without inventing what the reply contained. When it
+  proves information was sent, ask whether it was received or whether one point
+  needs clarification; never claim to attach or resend it. The body must contain
+  at most one question, and `information_requested` must contain zero or one
+  matching Simplified Chinese item. Never use “your inquiry”, “thank you for
+  your interest”, “您的询盘”, or “感谢您的关注”.
 - `referral_review`: return `no_message` with a reason that the referral role
   must be confirmed; do not draft a normal sales message.
 - `default`: follow the existing subtype-specific rules below.

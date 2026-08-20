@@ -67,6 +67,17 @@ CRM 全程只读，分类结果和调度时间只保存在本地 SQLite。
 - 状态未变化且仍满足条件：调用消息生成 Hermes；
 - 缺少有效邮箱和 LinkedIn：保留本地结果并标记 `needs_contact`。
 
+分类阶段还会单独识别 CRM remark 中有逐字证据的销售动作：
+
+- 销售已经回复或发送资料，且 `lastFollowUp` 可靠但尚未到期：继续保持 `scheduled`；
+- 同类记录到达所属分类的跟进窗口（未知需求为 3～7 天）：使用
+  `conversation_follow_up` 生成简短跟进；
+- 只有 `createdAt` 回退时间：进入 `needs_review`，不生成消息；
+- 已有一次人工回复并完成一次自动跟进：进入 `paused`。
+
+原始 remark 仍不会交给消息生成 Hermes；生成阶段只能看到分类器验证过的销售动作类型
+和逐字证据引用。
+
 ## Outbox 链路
 
 到期生成的有效消息自动导入独立 Outbox PostgreSQL。人工审阅开启时，

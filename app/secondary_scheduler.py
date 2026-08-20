@@ -18,6 +18,7 @@ from .outbox import (
     approve_message,
     get_message,
     preflight as outbox_preflight,
+    reject_pending_messages_for_lead,
     valid_email,
     valid_linkedin,
 )
@@ -51,28 +52,36 @@ DEFAULT_CLASSIFICATION_SKILL_DIR = (
 )
 DEFAULT_EXPORT_SCRIPT = PROJECT_DIR / "scripts" / "twenty_export_hermes_inputs.sh"
 DEFAULT_DB_CHECK_SCRIPT = PROJECT_DIR / "scripts" / "twenty_db_check.sh"
-CLASSIFICATION_POLICY_VERSION = "secondary-lead-v6"
+CLASSIFICATION_POLICY_VERSION = "secondary-lead-v7"
+SALES_FOLLOW_UP_TIME_UNVERIFIED = "SALES_FOLLOW_UP_TIME_UNVERIFIED"
+MESSAGE_JOB_STALE_AFTER = timedelta(minutes=30)
 
 
 def _needs_policy_reclassification(row: sqlite3.Row) -> bool:
-    if row["policy_version"] == CLASSIFICATION_POLICY_VERSION:
-        return False
-    if row["policy_version"] is None:
-        return True
-    if CLASSIFICATION_POLICY_VERSION != "secondary-lead-v6":
-        return True
-    if row["lead_type"] != "unknown_demand":
-        return False
-    try:
-        raw_types = (json.loads(row["crm_snapshot_json"]).get("lead") or {}).get(
-            "raw_type"
-        )
-    except (TypeError, json.JSONDecodeError):
-        return False
-    return isinstance(raw_types, list) and any(
-        str(raw_type).upper() in {"RECOMMEND", "RECOMMENDED"}
-        for raw_type in raw_types
+    return row["policy_version"] != CLASSIFICATION_POLICY_VERSION
+
+
+def _sales_follow_up_status(classification: Optional[Dict[str, Any]]) -> str:
+    context = (
+        classification.get("sales_follow_up_context")
+        if isinstance(classification, dict)
+        else None
     )
+    status = context.get("status") if isinstance(context, dict) else None
+    return status if status in {"sales_replied", "information_sent"} else "none"
+
+
+def _sales_follow_up_due_at(
+    record: Dict[str, Any],
+    days: int,
+) -> Optional[str]:
+    source_version = record.get("source_version") or {}
+    if source_version.get("activity_at_source") != "lastFollowUp":
+        return None
+    activity_at = source_version.get("activity_at")
+    if not activity_at:
+        return None
+    return isoformat(parse_timestamp(str(activity_at)) + timedelta(days=days))
 
 
 def _canonical_json(value: Any) -> str:
@@ -175,6 +184,7 @@ class SecondaryLeadScheduler:
             "classifications_requeued": (
                 self._requeue_outdated_review_classifications()
             ),
+            "message_jobs_recovered": self._recover_interrupted_message_jobs(),
         }
 
     def _migrate_full_scan_schedule(self) -> int:
@@ -527,14 +537,16 @@ class SecondaryLeadScheduler:
                 """
                 SELECT lead_id, lead_type, policy_version, crm_snapshot_json
                 FROM secondary_lead_state
-                WHERE status IN ('scheduled', 'needs_review', 'paused')
+                WHERE status = 'scheduled'
+                  AND next_action_at IS NOT NULL
+                  AND next_action_at <= ?
                   AND last_classified_at IS NOT NULL
                   AND last_generated_at IS NULL
                   AND latest_message_version_id IS NULL
                   AND (policy_version IS NULL OR policy_version != ?)
                 ORDER BY last_classified_at, lead_id
                 """,
-                (CLASSIFICATION_POLICY_VERSION,),
+                (now_text, CLASSIFICATION_POLICY_VERSION),
             ).fetchall()
             for row in rows:
                 if not _needs_policy_reclassification(row):
@@ -548,7 +560,7 @@ class SecondaryLeadScheduler:
                         last_error = NULL,
                         updated_at = ?
                     WHERE lead_id = ?
-                      AND status IN ('scheduled', 'needs_review', 'paused')
+                      AND status = 'scheduled'
                     """,
                     (now_text, now_text, row["lead_id"]),
                 )
@@ -624,6 +636,102 @@ class SecondaryLeadScheduler:
             )
         return max(cursor.rowcount, 0)
 
+    def _recover_interrupted_message_jobs(self) -> int:
+        """Release jobs left behind by a crashed scheduler process.
+
+        ``processing`` is only owned while the scheduler process is alive.  A
+        short age guard keeps a maintenance call from stealing a job that is
+        currently being processed by another invocation.  Expired retries are
+        already claimable by ``MessageJobProcessor``; their lead state still
+        needs to be made runnable when a crash happened between the two state
+        updates.
+        """
+        now = self.now()
+        now_text = isoformat(now)
+        stale_before = isoformat(now - MESSAGE_JOB_STALE_AFTER)
+        recovered = 0
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT job.id, job.lead_id, job.status, job.next_attempt_at,
+                       state.status AS lead_status
+                FROM analysis_job AS job
+                JOIN secondary_lead_state AS state
+                  ON state.latest_analysis_job_id = job.id
+                WHERE state.status IN ('generating', 'scheduled')
+                  AND (
+                    (
+                        job.status = 'processing'
+                        AND (
+                            job.processing_started_at IS NULL
+                            OR job.processing_started_at <= ?
+                        )
+                    )
+                    OR (
+                        job.status = 'retry_wait'
+                        AND job.next_attempt_at IS NOT NULL
+                        AND job.next_attempt_at <= ?
+                        AND (
+                            state.status = 'generating'
+                            OR state.next_action_at IS NULL
+                            OR state.next_action_at > ?
+                        )
+                    )
+                  )
+                ORDER BY job.updated_at, job.id
+                """,
+                (stale_before, now_text, now_text),
+            ).fetchall()
+            for row in rows:
+                if row["status"] == "processing":
+                    connection.execute(
+                        """
+                        UPDATE analysis_job
+                        SET status = 'pending',
+                            next_attempt_at = NULL,
+                            processing_started_at = NULL,
+                            last_error = ?,
+                            updated_at = ?
+                        WHERE id = ? AND status = 'processing'
+                        """,
+                        (
+                            "Recovered after scheduler restart",
+                            now_text,
+                            row["id"],
+                        ),
+                    )
+                recovered += 1
+                if row["lead_status"] not in {"generating", "scheduled"}:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE secondary_lead_state
+                    SET status = 'scheduled',
+                        next_action_at = ?,
+                        last_error = ?,
+                        updated_at = ?
+                    WHERE lead_id = ?
+                      AND status IN ('generating', 'scheduled')
+                    """,
+                    (
+                        now_text,
+                        "Recovered after scheduler restart",
+                        now_text,
+                        row["lead_id"],
+                    ),
+                )
+                self._event(
+                    connection,
+                    row["lead_id"],
+                    "message_generation_recovered",
+                    {
+                        "analysis_job_id": row["id"],
+                        "previous_job_status": row["status"],
+                    },
+                )
+        return recovered
+
     def _upsert_discovered(self, record: Dict[str, Any]) -> str:
         lead_id, source_updated_at, source_record_id, source_hash = (
             self._record_identity(record)
@@ -632,11 +740,20 @@ class SecondaryLeadScheduler:
         due_at = self._classification_due_at(record)
         snapshot_json = _canonical_json(record)
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT source_hash FROM secondary_lead_state WHERE lead_id = ?",
+                """
+                SELECT source_hash, latest_analysis_job_id
+                FROM secondary_lead_state WHERE lead_id = ?
+                """,
                 (lead_id,),
             ).fetchone()
+            if existing is not None and existing["source_hash"] != source_hash:
+                reject_pending_messages_for_lead(
+                    lead_id,
+                    "secondary-scheduler",
+                    "CRM source changed before review; superseded draft rejected.",
+                )
+            connection.execute("BEGIN IMMEDIATE")
             if existing is None:
                 connection.execute(
                     """
@@ -666,6 +783,26 @@ class SecondaryLeadScheduler:
                 )
                 result = "inserted"
             elif existing["source_hash"] != source_hash:
+                if existing["latest_analysis_job_id"]:
+                    connection.execute(
+                        """
+                        UPDATE analysis_job
+                        SET status = 'failed',
+                            next_attempt_at = NULL,
+                            processing_started_at = NULL,
+                            completed_at = ?,
+                            last_error = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                          AND status IN ('pending', 'processing', 'retry_wait')
+                        """,
+                        (
+                            now_text,
+                            "Superseded by CRM source change",
+                            now_text,
+                            existing["latest_analysis_job_id"],
+                        ),
+                    )
                 connection.execute(
                     """
                     UPDATE secondary_lead_state
@@ -817,18 +954,34 @@ class SecondaryLeadScheduler:
             )
         contact_permission = candidate["contact_permission"]["status"]
         warnings = record.get("warnings") or []
+        follow_up_status = _sales_follow_up_status(candidate)
+        follow_up_days = self._interval_days(candidate["lead_type"], lead_id, 0)
+        follow_up_at = (
+            _sales_follow_up_due_at(record, follow_up_days)
+            if follow_up_status != "none"
+            else None
+        )
         if contact_permission == "do_not_contact" or "DO_NOT_CONTACT" in warnings:
             status = "paused"
             next_action_at = None
             pause_reason = "CRM contains DO_NOT_CONTACT"
+        elif follow_up_status != "none" and int(row["follow_up_count"]) >= 1:
+            status = "paused"
+            next_action_at = None
+            pause_reason = "Sales already replied and one automated follow-up was sent"
+        elif follow_up_status != "none" and follow_up_at is None:
+            status = "needs_review"
+            next_action_at = None
+            pause_reason = SALES_FOLLOW_UP_TIME_UNVERIFIED
         elif confidence < threshold and self.human_review_enabled:
             status = "needs_review"
             next_action_at = None
             pause_reason = "Classification confidence is below threshold"
         else:
             status = "scheduled"
-            days = self._interval_days(candidate["lead_type"], lead_id, 0)
-            next_action_at = isoformat(self.now() + timedelta(days=days))
+            next_action_at = follow_up_at or isoformat(
+                self.now() + timedelta(days=follow_up_days)
+            )
             pause_reason = None
         classification_id = str(
             uuid.uuid5(
@@ -840,11 +993,34 @@ class SecondaryLeadScheduler:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute(
-                "SELECT source_hash FROM secondary_lead_state WHERE lead_id = ?",
+                """
+                SELECT source_hash, latest_analysis_job_id
+                FROM secondary_lead_state WHERE lead_id = ?
+                """,
                 (lead_id,),
             ).fetchone()
             if current is None or current["source_hash"] != row["source_hash"]:
                 raise RuntimeError("CRM source changed while classification was running")
+            if current["latest_analysis_job_id"]:
+                connection.execute(
+                    """
+                    UPDATE analysis_job
+                    SET status = 'failed',
+                        next_attempt_at = NULL,
+                        processing_started_at = NULL,
+                        completed_at = ?,
+                        last_error = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                      AND status IN ('pending', 'processing', 'retry_wait')
+                    """,
+                    (
+                        now_text,
+                        "Superseded by current classification",
+                        now_text,
+                        current["latest_analysis_job_id"],
+                    ),
+                )
             connection.execute(
                 """
                 INSERT INTO secondary_lead_classification
@@ -886,6 +1062,7 @@ class SecondaryLeadScheduler:
                     status = ?,
                     classification_due_at = NULL,
                     next_action_at = ?,
+                    latest_analysis_job_id = NULL,
                     last_classified_at = ?,
                     last_error = ?,
                     updated_at = ?
@@ -1267,15 +1444,6 @@ class SecondaryLeadScheduler:
         row: sqlite3.Row,
         record: Dict[str, Any],
     ) -> str:
-        existing_job_id = row["latest_analysis_job_id"]
-        if existing_job_id:
-            with self._connect() as connection:
-                existing = connection.execute(
-                    "SELECT status FROM analysis_job WHERE id = ?",
-                    (existing_job_id,),
-                ).fetchone()
-            if existing and existing["status"] in {"pending", "retry_wait"}:
-                return str(existing_job_id)
         generation_key = (
             f"{row['lead_id']}:{row['source_hash']}:{row['next_action_at']}:"
             f"{row['follow_up_count']}"
@@ -1286,6 +1454,15 @@ class SecondaryLeadScheduler:
                 f"secondary-message:{generation_key}",
             )
         )
+        existing_job_id = row["latest_analysis_job_id"]
+        if existing_job_id == job_id:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT status FROM analysis_job WHERE id = ?",
+                    (existing_job_id,),
+                ).fetchone()
+            if existing and existing["status"] in {"pending", "retry_wait"}:
+                return job_id
         message_hash = hashlib.sha256(generation_key.encode("utf-8")).hexdigest()
         job_dir = self.message_processor.jobs_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
@@ -1300,6 +1477,26 @@ class SecondaryLeadScheduler:
         now_text = isoformat(self.now())
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if existing_job_id and existing_job_id != job_id:
+                connection.execute(
+                    """
+                    UPDATE analysis_job
+                    SET status = 'failed',
+                        next_attempt_at = NULL,
+                        processing_started_at = NULL,
+                        completed_at = ?,
+                        last_error = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                      AND status IN ('pending', 'processing', 'retry_wait')
+                    """,
+                    (
+                        now_text,
+                        "Superseded by current message input",
+                        now_text,
+                        existing_job_id,
+                    ),
+                )
             connection.execute(
                 """
                 INSERT INTO analysis_job
@@ -1553,8 +1750,10 @@ class SecondaryLeadScheduler:
                   AND last_classified_at IS NOT NULL
                   AND last_generated_at IS NULL
                   AND latest_message_version_id IS NULL
+                  AND COALESCE(last_error, '') != ?
                 ORDER BY last_classified_at, lead_id
-                """
+                """,
+                (SALES_FOLLOW_UP_TIME_UNVERIFIED,),
             ).fetchall()
             connection.execute("BEGIN IMMEDIATE")
             for row in classification_rows:
@@ -1712,9 +1911,16 @@ class SecondaryLeadScheduler:
                 follow_up_count = int(row["follow_up_count"])
             else:
                 follow_up_count = int(row["follow_up_count"]) + 1
+                classification = self._classification_context(row)
+                has_prior_sales_follow_up = (
+                    _sales_follow_up_status(classification) != "none"
+                )
                 if (
-                    row["lead_type"] in SHORT_CYCLE_TYPES
-                    and follow_up_count >= 2
+                    (has_prior_sales_follow_up and follow_up_count >= 1)
+                    or (
+                        row["lead_type"] in SHORT_CYCLE_TYPES
+                        and follow_up_count >= 2
+                    )
                 ):
                     status = "paused"
                     next_action_at = None
@@ -1966,6 +2172,8 @@ class SecondaryLeadScheduler:
         started_at = isoformat(self.now())
         self._record_run_start(run_id, trigger, started_at)
         try:
+            self._recover_interrupted_message_jobs()
+            self._requeue_outdated_review_classifications()
             full_scan = None
             mode = "online"
             remote: Dict[str, Any] = {

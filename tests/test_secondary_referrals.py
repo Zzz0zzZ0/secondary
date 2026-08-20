@@ -41,6 +41,10 @@ class SecondaryReferralTest(unittest.TestCase):
                 "business_detail_quote": quote,
                 "reason": "推荐关系有原文依据。",
             },
+            "sales_follow_up_context": {
+                "status": "none",
+                "evidence_quote": None,
+            },
             "contact_permission": {
                 "status": "allowed",
                 "evidence_quote": None,
@@ -147,6 +151,43 @@ class SecondaryReferralTest(unittest.TestCase):
         )
         self.assertEqual(prepared["message_route"], "qualification")
 
+    def test_sales_reply_routes_to_conversation_follow_up(self):
+        note = "销售已回复客户，等待客户进一步反馈。"
+        candidate = self._candidate("recommender", "Colleague", note)
+        candidate["lead_type"] = "unknown_demand"
+        candidate["recommended_by"] = []
+        candidate["referral_relationship"] = None
+        candidate["sales_follow_up_context"] = {
+            "status": "sales_replied",
+            "evidence_quote": "销售已回复客户",
+        }
+
+        validated = validate_classification(
+            candidate,
+            self._record("Customer", note),
+        )
+        prepared = prepare_message_record(
+            self._record("Customer", note),
+            validated,
+        )
+
+        self.assertEqual(prepared["message_route"], "conversation_follow_up")
+        self.assertEqual(
+            prepared["sales_follow_up_context"]["evidence_quote"],
+            "销售已回复客户",
+        )
+        self.assertNotIn("internal_note", prepared["lead"])
+
+    def test_sales_reply_requires_exact_crm_quote(self):
+        candidate = self._candidate("recommender", "Colleague", "KP")
+        candidate["sales_follow_up_context"] = {
+            "status": "sales_replied",
+            "evidence_quote": "销售已回复客户",
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "must quote"):
+            validate_classification(candidate, self._record("Customer", "KP"))
+
     def test_secondary_lead_evidence_does_not_upgrade_to_inquiry(self):
         prepared = prepare_message_record(
             {
@@ -188,6 +229,38 @@ class SecondaryReferralTest(unittest.TestCase):
         }
         self.assertIn(
             "推荐人消息不得询问产品需求",
+            validation_errors(candidate, crm_input, "lead-1"),
+        )
+
+    def test_conversation_follow_up_cannot_invent_inquiry(self):
+        crm_input = {
+            "lead": {"id": "lead-1"},
+            "output": {"type": "email"},
+            "message_route": "conversation_follow_up",
+            "sales_follow_up_context": {
+                "status": "sales_replied",
+                "evidence_quote": "已回复",
+            },
+        }
+        candidate = {
+            "decision": "generated",
+            "lead_id": "lead-1",
+            "output_type": "email",
+            "content": {
+                "subject": "Follow-up on your inquiry",
+                "subject_zh": "跟进您的询盘",
+                "body": "Thank you for your interest. How can we help?",
+                "body_zh": "感谢您的关注。我们可以如何协助？",
+            },
+            "message_goal": "简短跟进",
+            "information_requested": ["需求"],
+            "warnings": [],
+            "reason": "跟进销售已回复的客户。",
+            "review_required": True,
+        }
+
+        self.assertIn(
+            "简短跟进不得虚构客户询盘或兴趣",
             validation_errors(candidate, crm_input, "lead-1"),
         )
 
@@ -312,7 +385,7 @@ class SecondaryReferralTest(unittest.TestCase):
         )
 
 
-    def test_v6_reclassifies_unknown_recommend_records_only(self):
+    def test_v7_reclassifies_all_older_policies(self):
         class Row(dict):
             def __getitem__(self, key):
                 return super().__getitem__(key)
@@ -329,7 +402,7 @@ class SecondaryReferralTest(unittest.TestCase):
         )
 
         self.assertTrue(_needs_policy_reclassification(referral))
-        self.assertFalse(_needs_policy_reclassification(unrelated))
+        self.assertTrue(_needs_policy_reclassification(unrelated))
         self.assertTrue(
             _needs_policy_reclassification(
                 Row(

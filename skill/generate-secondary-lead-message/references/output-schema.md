@@ -30,6 +30,7 @@ Return one JSON object and no surrounding Markdown.
 - For LinkedIn, always set both subject fields to `null`.
 - For `no_message` and `cannot_generate`, set all four content fields to `null`.
 - Write `message_goal`, all `information_requested` items, and `reason` in Simplified Chinese.
+- For `message_route=conversation_follow_up`, `information_requested` must contain zero or one item and the body must ask at most one question.
 - Keep `warnings`, `reason`, and `message_goal` internal. Never repeat their codes or wording in the customer-facing body.
 - Use stable uppercase warning codes.
 

@@ -407,6 +407,34 @@ def reject_message(message_id, reviewer, note=None):
     return get_review_message(message_id)
 
 
+def reject_pending_messages_for_lead(lead_id, reviewer, note=None):
+    """Reject every pending draft for a lead and emit one signal per draft."""
+    with connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE sales_automation.message_version
+            SET review_status = 'rejected', updated_at = now()
+            WHERE lead_id = %s AND review_status = 'pending_review'
+            RETURNING id
+            """,
+            (lead_id,),
+        )
+        message_ids = [row[0] for row in cursor.fetchall()]
+        for message_id in message_ids:
+            cursor.execute(
+                """
+                INSERT INTO sales_automation.message_approval
+                  (id, message_version_id, decision, approved_by, note)
+                VALUES (%s, %s, 'rejected', %s, %s)
+                """,
+                (uuid.uuid4(), message_id, reviewer, note),
+            )
+
+    for message_id in message_ids:
+        notify_secondary_outbox_event(message_id, "rejected")
+    return message_ids
+
+
 def list_outbox(limit=20):
     with connect() as conn, conn.cursor() as cursor:
         cursor.execute(
