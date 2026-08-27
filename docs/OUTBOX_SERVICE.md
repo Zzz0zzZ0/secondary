@@ -37,7 +37,6 @@ Generate local API tokens once, then run:
 ```
 
 Claimed tasks remain `sending` until the consumer reports `complete` or `fail`.
-The heartbeat endpoint is retained as a no-op compatibility endpoint.
 
 OpenAPI is available at `http://127.0.0.1:8010/docs`.
 
@@ -59,5 +58,5 @@ when using it, set `OUTBOX_DB_HOST=outbox-postgres` and `OUTBOX_DB_PORT=5432`.
 - `clients/python/outbox_client.py`
 - `clients/typescript/outbox-client.ts`
 
-Both clients preserve compatibility with claim, heartbeat, complete, and fail
-without external runtime dependencies.
+Both clients implement claim, complete, and fail without external runtime
+dependencies.

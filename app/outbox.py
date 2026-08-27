@@ -128,30 +128,78 @@ def import_run(run_dir: Path):
     return imported, skipped
 
 
-def list_messages(limit=20):
+def create_review_message(run_id, lead_id, crm_snapshot, output):
+    """Insert one validated draft into the existing manual-review queue."""
+    if not all(isinstance(value, dict) for value in (crm_snapshot, output)):
+        raise RuntimeError("CRM snapshot and output must be objects")
+    crm_snapshot = json.loads(json.dumps(crm_snapshot))
+    crm_snapshot["message_route"] = message_route(crm_snapshot, None)
+    errors = validation_errors(output, crm_snapshot, str(lead_id))
+    if errors:
+        raise RuntimeError("Review message failed validation: " + "; ".join(errors))
+    if output.get("decision") != "generated":
+        raise RuntimeError("Only generated messages can enter review")
+    channel = output.get("output_type")
+    contact = crm_snapshot.get("contact") or {}
+    recipient = contact.get("email") if channel == "email" else contact.get("linkedin_url")
+    recipient_valid = (
+        valid_email(recipient)
+        if channel == "email"
+        else valid_linkedin(recipient) if channel == "linkedin" else False
+    )
+    if not recipient_valid:
+        raise RuntimeError("Review message recipient is invalid")
+    message_id = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"twenty-hermes:{run_id}:{lead_id}:{channel}:1",
+    )
     with connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, lead_id, recipient_original, review_status, created_at
+            SELECT id
             FROM sales_automation.message_version
-            ORDER BY created_at DESC LIMIT %s
+            WHERE lead_id = %s AND review_status = 'pending_review'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            FOR UPDATE
             """,
-            (limit,),
+            (str(lead_id),),
         )
-        return cursor.fetchall()
-
-
-def get_message(message_id):
-    with connect() as conn, conn.cursor() as cursor:
+        existing = cursor.fetchone()
+        if existing is not None:
+            if str(existing[0]) == str(message_id):
+                return {
+                    "message_version_id": str(message_id),
+                    "lead_id": str(lead_id),
+                    "review_status": "pending_review",
+                    "created": False,
+                }
+            raise RuntimeError("Lead already has another pending review message")
         cursor.execute(
             """
-            SELECT id, lead_id, recipient_original, crm_snapshot,
-                   original_output, edited_output, review_status
-            FROM sales_automation.message_version WHERE id = %s
+            INSERT INTO sales_automation.message_version
+              (id, run_id, lead_id, channel, version, recipient_original,
+               crm_snapshot, original_output)
+            VALUES (%s, %s, %s, %s, 1, %s, %s, %s)
+            ON CONFLICT (run_id, lead_id, channel, version) DO NOTHING
             """,
-            (message_id,),
+            (
+                message_id,
+                run_id,
+                str(lead_id),
+                channel,
+                recipient,
+                _json(crm_snapshot),
+                _json(output),
+            ),
         )
-        return cursor.fetchone()
+        created = cursor.rowcount > 0
+    return {
+        "message_version_id": str(message_id),
+        "lead_id": str(lead_id),
+        "review_status": "pending_review",
+        "created": created,
+    }
 
 
 def _review_message(row):
@@ -292,6 +340,13 @@ def approve_message(message_id, reviewer, subject=None, body=None, note=None):
             original = row[4]
             channel = row[8]
             crm = row[3]
+            if isinstance(crm, dict) and (
+                crm.get("notes_review_only") is True
+                or crm.get("notes_experiment") is True
+            ):
+                raise RuntimeError(
+                    "Notes review-only messages cannot be approved for delivery"
+                )
             sender_account_ref = None
             effective = json.loads(json.dumps(row[5] or original))
             content = dict(effective.get("content") or {})
@@ -407,7 +462,13 @@ def reject_message(message_id, reviewer, note=None):
     return get_review_message(message_id)
 
 
-def reject_pending_messages_for_lead(lead_id, reviewer, note=None):
+def reject_pending_messages_for_lead(
+    lead_id,
+    reviewer,
+    note=None,
+    keep_note_id=None,
+    keep_email_at=None,
+):
     """Reject every pending draft for a lead and emit one signal per draft."""
     with connect() as conn, conn.cursor() as cursor:
         cursor.execute(
@@ -415,9 +476,16 @@ def reject_pending_messages_for_lead(lead_id, reviewer, note=None):
             UPDATE sales_automation.message_version
             SET review_status = 'rejected', updated_at = now()
             WHERE lead_id = %s AND review_status = 'pending_review'
+              AND (
+                %s::text IS NULL
+                OR crm_snapshot->'source_version'->>'note_id'
+                     IS DISTINCT FROM %s::text
+                OR crm_snapshot->'source_version'->>'email_at'
+                     IS DISTINCT FROM %s::text
+              )
             RETURNING id
             """,
-            (lead_id,),
+            (lead_id, keep_note_id, keep_note_id, keep_email_at),
         )
         message_ids = [row[0] for row in cursor.fetchall()]
         for message_id in message_ids:
@@ -433,19 +501,6 @@ def reject_pending_messages_for_lead(lead_id, reviewer, note=None):
     for message_id in message_ids:
         notify_secondary_outbox_event(message_id, "rejected")
     return message_ids
-
-
-def list_outbox(limit=20):
-    with connect() as conn, conn.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT id, recipient_original, status, attempt_count, available_at, created_at
-            FROM sales_automation.delivery_outbox
-            ORDER BY created_at DESC LIMIT %s
-            """,
-            (limit,),
-        )
-        return cursor.fetchall()
 
 
 def list_outbox_deliveries(limit=50):

@@ -21,9 +21,17 @@ class FakeCursor:
         self.calls.append((query, params))
         if "UPDATE sales_automation.message_version" in query:
             lead_id = params[0]
+            keep_note_id = params[1]
             self.returning = []
             for record in self.records:
-                if record["lead_id"] == lead_id and record["status"] == "pending_review":
+                if (
+                    record["lead_id"] == lead_id
+                    and record["status"] == "pending_review"
+                    and (
+                        keep_note_id is None
+                        or record.get("note_id") != keep_note_id
+                    )
+                ):
                     record["status"] = "rejected"
                     self.returning.append((record["id"],))
         elif "INSERT INTO sales_automation.message_approval" in query:
@@ -51,8 +59,8 @@ class PendingMessageRetirementTest(unittest.TestCase):
     def setUp(self):
         self.cursor = FakeCursor(
             [
-                {"id": "pending-1", "lead_id": "lead-1", "status": "pending_review"},
-                {"id": "pending-2", "lead_id": "lead-1", "status": "pending_review"},
+                {"id": "pending-1", "lead_id": "lead-1", "status": "pending_review", "note_id": None},
+                {"id": "pending-2", "lead_id": "lead-1", "status": "pending_review", "note_id": "note-current", "email_at": "2026-08-20T10:00:00+00:00"},
                 {"id": "approved-1", "lead_id": "lead-1", "status": "approved"},
                 {"id": "other-1", "lead_id": "lead-2", "status": "pending_review"},
             ]
@@ -93,6 +101,21 @@ class PendingMessageRetirementTest(unittest.TestCase):
         self.assertEqual([], second)
         self.assertEqual(2, len(self.cursor.approvals))
         notify.assert_not_called()
+
+    def test_can_keep_review_generated_from_current_note(self):
+        with patch.object(outbox, "connect", return_value=self.connection):
+            with patch.object(outbox, "notify_secondary_outbox_event") as notify:
+                retired = outbox.reject_pending_messages_for_lead(
+                    "lead-1",
+                    "notes-poller",
+                    "Superseded by current CRM Notes.",
+                    keep_note_id="note-current",
+                    keep_email_at="2026-08-20T10:00:00+00:00",
+                )
+
+        self.assertEqual(["pending-1"], retired)
+        self.assertEqual("pending_review", self.cursor.records[1]["status"])
+        self.assertEqual([("pending-1", "rejected")], [call.args for call in notify.call_args_list])
 
 
 if __name__ == "__main__":

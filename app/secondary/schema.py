@@ -84,6 +84,41 @@ CREATE TABLE IF NOT EXISTS secondary_lead_event (
 CREATE INDEX IF NOT EXISTS secondary_lead_event_lead_idx
   ON secondary_lead_event (lead_id, event_at DESC, id DESC);
 
+CREATE TABLE IF NOT EXISTS notes_follow_up_state (
+  latest_note_id TEXT PRIMARY KEY,
+  lead_id TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  source_created_at TEXT NOT NULL,
+  crm_snapshot_json TEXT NOT NULL,
+  structural_state TEXT NOT NULL
+    CHECK (structural_state IN (
+      'needs_analysis', 'waiting_customer', 'manual_review'
+    )),
+  status TEXT NOT NULL
+    CHECK (status IN (
+      'pending', 'processing', 'retry_wait', 'completed',
+      'baseline', 'skipped', 'failed', 'superseded'
+    )),
+  decision TEXT,
+  publication_type TEXT
+    CHECK (
+      publication_type IS NULL OR publication_type IN ('message', 'action')
+    ),
+  publication_id TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  analysis_json TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS notes_follow_up_due_idx
+  ON notes_follow_up_state (status, next_attempt_at, source_created_at DESC);
+
+CREATE INDEX IF NOT EXISTS notes_follow_up_lead_idx
+  ON notes_follow_up_state (lead_id, source_created_at DESC);
+
 CREATE TABLE IF NOT EXISTS scheduler_run (
   id TEXT PRIMARY KEY,
   trigger TEXT NOT NULL,
@@ -102,4 +137,30 @@ CREATE INDEX IF NOT EXISTS scheduler_run_started_idx
 
 def initialize_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA_SQL)
-
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ("notes_follow_up_state",),
+    ).fetchone()
+    table_sql = row[0] if row else ""
+    if "'baseline'" in table_sql:
+        return
+    connection.execute(
+        "ALTER TABLE notes_follow_up_state RENAME TO notes_follow_up_state_old"
+    )
+    connection.executescript(SCHEMA_SQL)
+    connection.execute(
+        """
+        INSERT INTO notes_follow_up_state
+          (latest_note_id, lead_id, source_hash, source_created_at,
+           crm_snapshot_json, structural_state, status, decision,
+           publication_type, publication_id, attempts, next_attempt_at,
+           analysis_json, last_error, created_at, updated_at)
+        SELECT latest_note_id, lead_id, source_hash, source_created_at,
+               crm_snapshot_json, structural_state, status, decision,
+               publication_type, publication_id, attempts, next_attempt_at,
+               analysis_json, last_error, created_at, updated_at
+        FROM notes_follow_up_state_old
+        """
+    )
+    connection.execute("DROP TABLE notes_follow_up_state_old")
+    connection.executescript(SCHEMA_SQL)

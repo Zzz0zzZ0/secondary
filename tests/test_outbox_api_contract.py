@@ -9,7 +9,11 @@ class OutboxApiContractTest(unittest.TestCase):
         complete = schema["components"]["schemas"]["CompleteRequest"]
         failed = schema["components"]["schemas"]["FailRequest"]
 
-        self.assertIn("/v1/deliveries/{delivery_id}/heartbeat", schema["paths"])
+        self.assertNotIn("/v1/deliveries/{delivery_id}/heartbeat", schema["paths"])
+        self.assertNotIn(
+            "/v1/messages/{message_id}/approve-and-enqueue",
+            schema["paths"],
+        )
         self.assertIn("/v1/deliveries/{delivery_id}/complete", schema["paths"])
         self.assertIn("/v1/deliveries/{delivery_id}/fail", schema["paths"])
         self.assertEqual({"worker_id"}, set(complete["properties"]))

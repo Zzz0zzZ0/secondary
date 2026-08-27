@@ -41,10 +41,15 @@ CRM 全程只读，分类结果和调度时间只保存在本地 SQLite。
 | `referred` | （被）推荐 | 1-3 天 |
 | `below_moq` | 订量不够 | 60-90 天 |
 
-区间内日期根据联系人、分类和跟进次数稳定分散，避免任务集中在同一天。人工审阅开启时，
-分类置信度低于 `0.65` 会进入 `needs_review`。业务人员可在 Review UI 中选择“暂无需求、
+`person.leadtype` 不参与候选过滤，但销售明确填写的结构化
+`SMALL_QUANTITY` 对分类具有优先级，固定映射为 `below_moq`。这类记录不得进入
+当前产品的普通跟进路由，只能按订量不够策略低频询问合并采购、未来用量、其他产品需求
+或时机是否变化。
+
+区间内日期根据联系人、分类和跟进次数稳定分散，避免任务集中在同一天。分类置信度低于
+`0.65` 会进入 `needs_review`。业务人员可在 Review UI 中选择“暂无需求、
 未知需求、（被）推荐、订量不够”完成确认或纠正；确认后从当天起按所选分类计算
-`next_action_at`。关闭人工审阅时，系统直接按 Hermes 分类结果排期。
+`next_action_at`。
 
 分类标准 `secondary-lead-v3` 将“分类置信度”“CRM 信息完整度”和“消息证据”分开。记录明显只有
 行业关键词、目录请求或联系方式时，可以高置信度归入 `unknown_demand`，同时保留较低
@@ -63,6 +68,8 @@ CRM 全程只读，分类结果和调度时间只保存在本地 SQLite。
 到期后会重新读取当前 CRM 记录：
 
 - 已转询盘、客户、被删除或离开二级线索范围：标记为 `converted`；
+- 每次完整 CRM 扫描成功后，以本次扫描集合对账本地活动记录；缺失记录同时退回待审草稿、
+  取消待处理会话动作并终止未完成的生成任务。扫描中断时不执行清理；
 - CRM 内容有变化：重新进入 48 小时沉淀；
 - 状态未变化且仍满足条件：调用消息生成 Hermes；
 - 缺少有效邮箱和 LinkedIn：保留本地结果并标记 `needs_contact`。
@@ -80,9 +87,8 @@ CRM 全程只读，分类结果和调度时间只保存在本地 SQLite。
 
 ## Outbox 链路
 
-到期生成的有效消息自动导入独立 Outbox PostgreSQL。人工审阅开启时，
-`sales_automation.message_version` 保持 `pending_review`；关闭时系统自动批准，并创建
-`delivery_outbox` 投递任务。
+到期生成的有效消息自动导入独立 Outbox PostgreSQL，并始终以
+`sales_automation.message_version.pending_review` 等待人工审阅。系统没有自动批准旁路。
 
 人工批准时，`message_version` 和审批记录被更新，并在同一事务中创建
 `delivery_outbox`。Outbox 批准和成功投递会向本地调度状态发送信号：
@@ -93,20 +99,8 @@ CRM 全程只读，分类结果和调度时间只保存在本地 SQLite。
 
 真实发送由 Outbox 下游消费者负责；调度器只生成和排队消息，不直接调用发送平台。
 
-`config/local.env` 提供人工审阅的首次启动默认值：
-
-```dotenv
-HERMES_HUMAN_REVIEW_ENABLED=true
-HERMES_AUTO_REVIEWER=hermes-scheduler
-HERMES_SECONDARY_SETTLE_JITTER_HOURS=24
-HERMES_CLASSIFICATION_BATCH_SIZE=20
-HERMES_CLASSIFICATION_BACKLOG_DELAY_MINUTES=10
-```
-
-Review UI 顶部按钮可即时开启或关闭人工审阅。实际运行值保存在本地 SQLite
-`scheduler_state`，优先于环境变量；点击后通过本地 Unix 套接字唤醒正在运行的
-`hermes-poller`，通常一秒内进入新周期。调度器未运行时设置仍会保存，并在下次启动时
-生效。关闭时会释放已有低置信度分类和待审阅消息；重新开启不会撤回已经批准的消息。
+人工审阅固定开启，Review UI 顶部显示只读状态。低置信度分类和已生成消息都必须由人
+处理，配置文件和 API 不提供关闭入口。
 
 ## 运行
 
@@ -197,11 +191,7 @@ security add-generic-password -U \
 Review UI 提供：
 
 ```text
-POST /api/runs
-GET /api/runs/{run_id}
-GET /api/runs/{run_id}/results
 GET /api/polling/status
-POST /api/polling/review-mode
 GET /api/polling/dashboard?days=30&run_limit=10
 GET /api/polling/runs?limit=20
 GET /api/polling/queue?limit=50
@@ -218,9 +208,9 @@ POST /api/review/messages/{message_id}/reject
 ```
 
 页面默认展示只读运行看板，包括状态总量、处理流程、到期积压、未来 30 天排期、最近
-运行和线索事件轨迹。消息预览从 `scheduled` 队列按最早排期、最近分类或随机抽样，
-使用正式调度相同的分类与排期上下文，但不修改状态、不写入 Outbox。只有低置信度分类
-记录提供人工分类确认按钮。正式待审消息可人工修改，或输入新限制和方向让 Hermes
+运行和线索事件轨迹。页面不提供从 `scheduled` 队列临时生成预览的入口；消息只能由正式
+调度流程到期生成并进入待审队列。只有低置信度分类记录提供人工分类确认按钮。正式待审
+消息可人工修改，或输入新限制和方向让 Hermes
 重新生成；重新生成后仍为 `pending_review`。批准会创建 `delivery_outbox`，拒绝不会
 创建投递任务。`needs_contact` 和 `failed` 记录可通过 retry 接口显式重新排期，不会自动
 无限重试。页面没有扫描或直接发送按钮。
@@ -238,6 +228,7 @@ POST /api/review/messages/{message_id}/reject
 - `secondary_lead_state`：每位联系人的当前分类、状态和时间戳；
 - `secondary_lead_classification`：每个 CRM 内容版本的分类结果；
 - `secondary_lead_event`：发现、分类、生成和 Outbox 信号审计；
+- `notes_follow_up_state`：按最新 Note 记录 Notes 路由的幂等、分析、发布和重试状态；
 - `scheduler_state`：下次全量二级线索扫描时间；
 - `scheduler_run`：从本版本起记录每次周期的开始、完成、扫描、分类、生成和 Token
   汇总；写入失败不会阻断原有调度；
@@ -254,8 +245,24 @@ HERMES_SECONDARY_SCAN_BATCH_SIZE=500
 HERMES_CLASSIFICATION_MIN_CONFIDENCE=0.65
 HERMES_CLASSIFICATION_TIMEOUT_SECONDS=600
 HERMES_POLL_MAX_ATTEMPTS=3
+HERMES_NOTES_ENABLED=true
+HERMES_NOTES_SCAN_MINUTES=10
+HERMES_NOTES_SCAN_LIMIT=500
+HERMES_NOTES_BATCH_SIZE=3
+HERMES_NOTES_MAX_ATTEMPTS=3
+HERMES_NOTES_PROCESS_EXISTING=false
 TWENTY_BUSINESS_TIMEZONE=Asia/Shanghai
 ```
+
+Notes 路由只处理二级联系人的当前格式邮件备注，忽略标题以“邮件沟通记录”开头的旧记录。
+它与旧的二级分类排期共用 Poller 进程，但使用独立状态表：最后一封为客户来信时才调用
+Hermes；最后一封由销售发出、无需回复或已处理的同一 Note 不会重复调用。客户草稿进入
+待审消息，内部任务和不确定项进入会话动作。当前 Notes 客户草稿只允许人工审阅，不允许
+批准进入 Outbox。
+
+首次启用时，当前最新 Notes 只写为上线基线，不自动回放历史会话；同一联系人之后出现新的
+Note 才进入自动处理。需要一次性回放历史时，可临时设置
+`HERMES_NOTES_PROCESS_EXISTING=true`，但应先评估 Hermes 额度和人工队列容量。
 
 默认使用已确认的 6 小时、24 小时扫描周期；如修改配置，应同步评估 CRM 压力和业务
 跟进窗口。

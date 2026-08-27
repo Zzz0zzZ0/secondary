@@ -2,6 +2,19 @@
 
 Use these examples as behavioral patterns, not reusable customer facts.
 
+## Verified Customer Email Reply
+
+Input situation: `message_route=email_reply` and `review_context.crm_email_evidence` contains
+the latest exact customer-email evidence.
+
+- Reply to that email directly; never write a first-touch introduction.
+- Use only the supplied evidence and recent-email context.
+- Do not claim a file is attached or that a product, price, document, or action
+  is confirmed unless the input proves it.
+- The Notes analyzer keeps internal work out of the message queue instead of
+  creating a placeholder holding reply. Ask at most one necessary question.
+- Preserve `NOTES_REVIEW_ONLY_REQUIRES_MANUAL_REVIEW`.
+
 ## Confidential Reference Request
 
 Input situation: A customer asks for names of companies previously supplied in a country, but no approved reference list is provided.

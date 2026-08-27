@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,450 @@ from app.secondary_scheduler import _sales_follow_up_due_at
 
 
 class SecondarySchedulerReviewTest(unittest.TestCase):
+    def test_full_scan_converts_and_retires_leads_missing_from_crm_scope(self):
+        now = datetime(2026, 8, 27, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            current = {
+                "lead": {"id": "current-lead", "created_at": now.isoformat()},
+                "source_version": {
+                    "record_id": "current-lead",
+                    "updated_at": now.isoformat(),
+                    "activity_at": now.isoformat(),
+                },
+            }
+            scheduler._export_batch = Mock(return_value=[current])
+            with scheduler._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO secondary_lead_state
+                      (lead_id, source_hash, source_updated_at, source_record_id,
+                       crm_snapshot_json, status, latest_message_version_id,
+                       last_seen_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'waiting_review', ?, ?, ?, ?)
+                    """,
+                    (
+                        "missing-lead",
+                        "source-1",
+                        now.isoformat(),
+                        "missing-lead",
+                        "message-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO notes_follow_up_state
+                      (latest_note_id, lead_id, source_hash, source_created_at,
+                       crm_snapshot_json, structural_state, status,
+                       created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'needs_analysis', 'pending', ?, ?)
+                    """,
+                    (
+                        "note-1",
+                        "missing-lead",
+                        "notes-source-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+            with (
+                patch(
+                    "app.secondary_scheduler.reject_pending_messages_for_lead"
+                ) as reject_messages,
+                patch(
+                    "app.secondary_scheduler.dismiss_pending_actions_for_lead"
+                ) as dismiss_actions,
+            ):
+                counts = scheduler.scan()
+
+            self.assertEqual(1, counts["converted"])
+            reject_messages.assert_called_once_with(
+                "missing-lead",
+                "secondary-scheduler",
+                "Lead left the secondary CRM scope; pending review retired.",
+            )
+            dismiss_actions.assert_called_once_with(
+                "missing-lead",
+                "secondary-scheduler",
+                "Lead left the secondary CRM scope; pending action dismissed.",
+            )
+            with scheduler._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT status, next_action_at, latest_message_version_id
+                    FROM secondary_lead_state
+                    WHERE lead_id = 'missing-lead'
+                    """
+                ).fetchone()
+                event = connection.execute(
+                    """
+                    SELECT event_type, details_json FROM secondary_lead_event
+                    WHERE lead_id = 'missing-lead'
+                    ORDER BY id DESC LIMIT 1
+                    """
+                ).fetchone()
+                notes_status = connection.execute(
+                    """
+                    SELECT status FROM notes_follow_up_state
+                    WHERE latest_note_id = 'note-1'
+                    """
+                ).fetchone()["status"]
+            self.assertEqual(
+                ("converted", None, None),
+                tuple(row),
+            )
+            self.assertEqual("left_secondary_lead_scope", event["event_type"])
+            self.assertEqual(
+                "full_scan",
+                json.loads(event["details_json"])["source"],
+            )
+            self.assertEqual("superseded", notes_status)
+
+    def test_incomplete_full_scan_does_not_retire_missing_leads(self):
+        now = datetime(2026, 8, 27, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={"HERMES_SECONDARY_SCAN_BATCH_SIZE": "1"},
+                now=lambda: now,
+            )
+            current = {
+                "lead": {"id": "current-lead", "created_at": now.isoformat()},
+                "source_version": {
+                    "record_id": "current-lead",
+                    "updated_at": now.isoformat(),
+                    "activity_at": now.isoformat(),
+                },
+            }
+            scheduler._export_batch = Mock(
+                side_effect=[[current], RuntimeError("CRM export interrupted")]
+            )
+            with scheduler._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO secondary_lead_state
+                      (lead_id, source_hash, source_updated_at, source_record_id,
+                       crm_snapshot_json, status, latest_message_version_id,
+                       last_seen_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'waiting_review', ?, ?, ?, ?)
+                    """,
+                    (
+                        "missing-lead",
+                        "source-1",
+                        now.isoformat(),
+                        "missing-lead",
+                        "message-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+            with (
+                patch(
+                    "app.secondary_scheduler.reject_pending_messages_for_lead"
+                ) as reject_messages,
+                patch(
+                    "app.secondary_scheduler.dismiss_pending_actions_for_lead"
+                ) as dismiss_actions,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "CRM export interrupted"):
+                    scheduler.scan()
+
+            reject_messages.assert_not_called()
+            dismiss_actions.assert_not_called()
+            with scheduler._connect() as connection:
+                status = connection.execute(
+                    """
+                    SELECT status FROM secondary_lead_state
+                    WHERE lead_id = 'missing-lead'
+                    """
+                ).fetchone()["status"]
+            self.assertEqual("waiting_review", status)
+
+    def test_lead_detail_includes_read_notes_context(self):
+        now = datetime(2026, 8, 26, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            record = {
+                "lead_id": "lead-1",
+                "notes": [
+                    {
+                        "note_id": "note-1",
+                        "direction": "SHOU",
+                        "email_at": now.isoformat(),
+                        "subject": "Re: Proposal",
+                        "body": "Thank you. We will contact you if needed.",
+                    }
+                ],
+            }
+            with scheduler._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO secondary_lead_state
+                      (lead_id, source_hash, source_updated_at, source_record_id,
+                       crm_snapshot_json, status, last_seen_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'settling', ?, ?, ?)
+                    """,
+                    (
+                        "lead-1",
+                        "source-1",
+                        now.isoformat(),
+                        "lead-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO notes_follow_up_state
+                      (latest_note_id, lead_id, source_hash, source_created_at,
+                       crm_snapshot_json, structural_state, status,
+                       created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'needs_analysis', 'pending', ?, ?)
+                    """,
+                    (
+                        "note-1",
+                        "lead-1",
+                        "notes-source-1",
+                        now.isoformat(),
+                        json.dumps(record),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+            detail = scheduler.lead_detail("lead-1")
+
+            self.assertEqual(1, detail["notes_follow_up"]["note_count"])
+            self.assertEqual("pending", detail["notes_follow_up"]["status"])
+            self.assertEqual(
+                "note-1",
+                detail["notes_follow_up"]["latest_note_id"],
+            )
+            self.assertEqual(record["notes"], detail["notes_follow_up"]["notes"])
+
+    def test_run_cycle_invokes_notes_route_only_when_due(self):
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={"HERMES_NOTES_SCAN_MINUTES": "10"},
+                now=lambda: now,
+            )
+            scheduler.classify_due = Mock(return_value=[])
+            scheduler.dispatch_due = Mock(return_value=[])
+            scheduler.notes_processor.run = Mock(
+                return_value={"status": "ok", "processed": 1}
+            )
+            with scheduler._connect() as connection:
+                scheduler._set_state(
+                    connection,
+                    "next_full_scan_at",
+                    "2026-08-22T00:00:00+00:00",
+                )
+
+            first = scheduler.run_cycle(trigger="test")
+            second = scheduler.run_cycle(trigger="test")
+
+            self.assertEqual({"status": "ok", "processed": 1}, first["notes"])
+            self.assertIsNone(second["notes"])
+            scheduler.notes_processor.run.assert_called_once_with()
+
+    def test_notes_scan_runs_before_main_classification_and_dispatch(self):
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            calls = []
+            scheduler.classify_due = Mock(
+                side_effect=lambda _limit: calls.append("classify") or []
+            )
+            scheduler.notes_processor.run = Mock(
+                side_effect=lambda: calls.append("notes") or {"status": "ok"}
+            )
+            scheduler.dispatch_due = Mock(
+                side_effect=lambda: calls.append("dispatch") or []
+            )
+            with scheduler._connect() as connection:
+                scheduler._set_state(
+                    connection,
+                    "next_full_scan_at",
+                    "2026-08-22T00:00:00+00:00",
+                )
+
+            scheduler.run_cycle(trigger="test")
+
+            self.assertEqual(["notes", "classify", "dispatch"], calls)
+
+    def test_main_classification_skips_lead_owned_by_current_notes(self):
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            with scheduler._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO secondary_lead_state
+                      (lead_id, source_hash, source_updated_at, source_record_id,
+                       crm_snapshot_json, status, classification_due_at,
+                       last_seen_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'settling', ?, ?, ?, ?)
+                    """,
+                    (
+                        "lead-1",
+                        "source-1",
+                        now.isoformat(),
+                        "lead-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO notes_follow_up_state
+                      (latest_note_id, lead_id, source_hash, source_created_at,
+                       crm_snapshot_json, structural_state, status,
+                       created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'needs_analysis', 'pending', ?, ?)
+                    """,
+                    (
+                        "note-1",
+                        "lead-1",
+                        "notes-source-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+            self.assertIsNone(scheduler._claim_due_classification())
+
+    def test_main_dispatch_skips_lead_owned_by_current_notes(self):
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            with scheduler._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO secondary_lead_state
+                      (lead_id, source_hash, source_updated_at, source_record_id,
+                       crm_snapshot_json, lead_type, status, next_action_at,
+                       last_seen_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'unknown_demand', 'scheduled', ?, ?, ?, ?)
+                    """,
+                    (
+                        "lead-1",
+                        "source-1",
+                        now.isoformat(),
+                        "lead-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO notes_follow_up_state
+                      (latest_note_id, lead_id, source_hash, source_created_at,
+                       crm_snapshot_json, structural_state, status,
+                       created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'needs_analysis', 'pending', ?, ?)
+                    """,
+                    (
+                        "note-1",
+                        "lead-1",
+                        "notes-source-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+            self.assertIsNone(scheduler._claim_due_action())
+
+    def test_notes_owned_lead_remains_in_its_business_queue(self):
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            with scheduler._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO secondary_lead_state
+                      (lead_id, source_hash, source_updated_at, source_record_id,
+                       crm_snapshot_json, lead_type, status,
+                       last_seen_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'unknown_demand', 'needs_review', ?, ?, ?)
+                    """,
+                    (
+                        "lead-1",
+                        "source-1",
+                        now.isoformat(),
+                        "lead-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO notes_follow_up_state
+                      (latest_note_id, lead_id, source_hash, source_created_at,
+                       crm_snapshot_json, structural_state, status,
+                       created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'needs_analysis', 'pending', ?, ?)
+                    """,
+                    (
+                        "note-1",
+                        "lead-1",
+                        "notes-source-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+            counts = scheduler.status()["counts"]
+            manual_queue = scheduler.queue(10, ["needs_review"])
+
+            self.assertNotIn("notes_follow_up", counts)
+            self.assertEqual(1, counts["needs_review"])
+            self.assertEqual("lead-1", manual_queue[0]["lead_id"])
+            self.assertEqual(1, manual_queue[0]["notes_owned"])
+            with self.assertRaises(RuntimeError):
+                scheduler.queue(10, ["notes_follow_up"])
+
     def test_sales_follow_up_uses_reliable_last_follow_up_time(self):
         record = {
             "source_version": {

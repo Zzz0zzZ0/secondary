@@ -15,13 +15,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .outbox import (
-    approve_message,
-    get_message,
     preflight as outbox_preflight,
     reject_pending_messages_for_lead,
     valid_email,
     valid_linkedin,
 )
+from .conversation_actions import dismiss_pending_actions_for_lead
 from .secondary.classification_runner import ClassificationRunner
 from .secondary.domain import (
     LEAD_TYPES,
@@ -31,10 +30,8 @@ from .secondary.domain import (
     SHORT_CYCLE_TYPES,
     interval_days,
 )
-from .secondary.message_policy import (
-    MANUAL_CONFIRMATION_WARNING,
-    prepare_message_record,
-)
+from .secondary.message_policy import prepare_message_record
+from .secondary.notes_followup import NotesFollowUpProcessor
 from .secondary.schema import initialize_schema
 from .message_jobs import (
     DEFAULT_PIPELINE_SCRIPT,
@@ -126,22 +123,6 @@ def _validated_int(
     return value
 
 
-def _environment_flag(
-    environment: Dict[str, str],
-    name: str,
-    default: bool,
-) -> bool:
-    raw = environment.get(name)
-    if raw is None:
-        return default
-    value = raw.strip().lower()
-    if value in {"true", "1", "yes", "on"}:
-        return True
-    if value in {"false", "0", "no", "off"}:
-        return False
-    raise RuntimeError(f"{name} must be true or false")
-
-
 class SecondaryLeadScheduler:
     def __init__(
         self,
@@ -176,10 +157,15 @@ class SecondaryLeadScheduler:
         )
         self.control_socket_path = self.state_dir / "secondary-scheduler.sock"
         self._initialize_database()
+        self.notes_processor = NotesFollowUpProcessor(
+            connect=self._connect,
+            environment=self.environment,
+            now=self.now,
+            sync_message_review=self._bind_notes_review,
+        )
 
     def maintain(self) -> Dict[str, int]:
         return {
-            "scan_schedule_migrated": self._migrate_full_scan_schedule(),
             "settling_dates_repaired": self._repair_settling_due_dates(),
             "classifications_requeued": (
                 self._requeue_outdated_review_classifications()
@@ -187,63 +173,11 @@ class SecondaryLeadScheduler:
             "message_jobs_recovered": self._recover_interrupted_message_jobs(),
         }
 
-    def _migrate_full_scan_schedule(self) -> int:
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = self._state(connection, "next_full_scan_at")
-            old_rows = connection.execute(
-                """
-                SELECT key
-                FROM scheduler_state
-                WHERE key IN ('next_recent_scan_at', 'next_reconcile_at')
-                """
-            ).fetchall()
-            if existing is None:
-                self._set_state(
-                    connection,
-                    "next_full_scan_at",
-                    isoformat(self.now()),
-                )
-            connection.execute(
-                """
-                DELETE FROM scheduler_state
-                WHERE key IN ('next_recent_scan_at', 'next_reconcile_at')
-                """
-            )
-        return len(old_rows)
-
-    @property
-    def human_review_enabled(self) -> bool:
-        with self._connect() as connection:
-            configured = self._state(
-                connection,
-                "human_review_enabled",
-            )
-        if configured is not None:
-            return _environment_flag(
-                {"HERMES_HUMAN_REVIEW_ENABLED": configured},
-                "HERMES_HUMAN_REVIEW_ENABLED",
-                True,
-            )
-        return _environment_flag(
-            self.environment,
-            "HERMES_HUMAN_REVIEW_ENABLED",
-            True,
-        )
-
     def review_configuration(self) -> Dict[str, Any]:
-        enabled = self.human_review_enabled
         return {
-            "enabled": enabled,
-            "mode": "manual" if enabled else "automatic",
-            "auto_reviewer": (
-                None
-                if enabled
-                else self.environment.get(
-                    "HERMES_AUTO_REVIEWER",
-                    "hermes-scheduler",
-                )
-            ),
+            "enabled": True,
+            "mode": "manual",
+            "auto_reviewer": None,
         }
 
     def _notify_scheduler(self) -> bool:
@@ -258,59 +192,30 @@ class SecondaryLeadScheduler:
         finally:
             control.close()
 
-    def set_human_review_enabled(
-        self,
-        enabled: bool,
-        actor: str = "review-ui",
-    ) -> Dict[str, Any]:
-        actor = actor.strip()
-        if not actor or len(actor) > 200:
-            raise RuntimeError("Actor must be between 1 and 200 characters")
-        changed_at = isoformat(self.now())
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._set_state(
-                connection,
-                "human_review_enabled",
-                "true" if enabled else "false",
-            )
-            self._set_state(
-                connection,
-                "human_review_changed_at",
-                changed_at,
-            )
-            self._set_state(
-                connection,
-                "human_review_changed_by",
-                actor,
-            )
-        notified = self._notify_scheduler()
-        return {
-            **self.review_configuration(),
-            "changed_at": changed_at,
-            "changed_by": actor,
-            "scheduler_notified": notified,
-        }
-
-    def _auto_approve_message(self, message_version_id: str, note: str) -> None:
-        reviewer = self.environment.get(
-            "HERMES_AUTO_REVIEWER",
-            "hermes-scheduler",
-        )
-        try:
-            approve_message(
-                message_version_id,
-                reviewer,
-                note=note,
-            )
-        except Exception:
-            existing = get_message(message_version_id)
-            if existing is None or existing[6] != "approved":
-                raise
-        self.handle_outbox_signal(message_version_id, "approved")
-
     def _connect(self) -> sqlite3.Connection:
         return self.message_processor.connect()
+
+    def _bind_notes_review(self, lead_id: str, message_version_id: str) -> None:
+        now_text = isoformat(self.now())
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE secondary_lead_state
+                SET status = 'waiting_review', next_action_at = NULL,
+                    latest_message_version_id = ?, last_error = NULL,
+                    updated_at = ?
+                WHERE lead_id = ?
+                """,
+                (message_version_id, now_text, lead_id),
+            ).rowcount
+            if changed:
+                self._event(
+                    connection,
+                    lead_id,
+                    "notes_review_bound",
+                    {"message_version_id": message_version_id},
+                )
 
     def _initialize_database(self) -> None:
         with self._connect() as connection:
@@ -874,12 +779,21 @@ class SecondaryLeadScheduler:
             9999,
         )
         cursor_id = ""
-        counts = {"seen": 0, "inserted": 0, "updated": 0, "unchanged": 0}
+        seen_lead_ids = set()
+        counts = {
+            "seen": 0,
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "converted": 0,
+        }
         while True:
             records = self._export_batch(cursor_id, batch_size)
             if not records:
                 break
             for record in records:
+                lead_id, _, _, _ = self._record_identity(record)
+                seen_lead_ids.add(lead_id)
                 status = self._upsert_discovered(record)
                 counts["seen"] += 1
                 counts[status] += 1
@@ -890,7 +804,88 @@ class SecondaryLeadScheduler:
             cursor_id = next_id
             if len(records) < batch_size:
                 break
+        with self._connect() as connection:
+            missing_lead_ids = [
+                row["lead_id"]
+                for row in connection.execute(
+                    """
+                    SELECT lead_id FROM secondary_lead_state
+                    WHERE status != 'converted'
+                    """
+                )
+                if row["lead_id"] not in seen_lead_ids
+            ]
+        for lead_id in missing_lead_ids:
+            if self._convert_out_of_scope(lead_id):
+                counts["converted"] += 1
         return counts
+
+    def _convert_out_of_scope(
+        self,
+        lead_id: str,
+        source: str = "full_scan",
+    ) -> bool:
+        reject_pending_messages_for_lead(
+            lead_id,
+            "secondary-scheduler",
+            "Lead left the secondary CRM scope; pending review retired.",
+        )
+        dismiss_pending_actions_for_lead(
+            lead_id,
+            "secondary-scheduler",
+            "Lead left the secondary CRM scope; pending action dismissed.",
+        )
+        now_text = isoformat(self.now())
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE analysis_job
+                SET status = 'failed', next_attempt_at = NULL,
+                    processing_started_at = NULL, completed_at = ?,
+                    last_error = ?, updated_at = ?
+                WHERE lead_id = ?
+                  AND status IN ('pending', 'processing', 'retry_wait')
+                """,
+                (
+                    now_text,
+                    "Lead left the secondary CRM scope",
+                    now_text,
+                    lead_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE notes_follow_up_state
+                SET status = 'superseded', next_attempt_at = NULL,
+                    last_error = NULL, updated_at = ?
+                WHERE lead_id = ?
+                  AND status IN ('pending', 'processing', 'retry_wait')
+                """,
+                (now_text, lead_id),
+            )
+            changed = connection.execute(
+                """
+                UPDATE secondary_lead_state
+                SET status = 'converted',
+                    classification_due_at = NULL,
+                    next_action_at = NULL,
+                    latest_analysis_job_id = NULL,
+                    latest_message_version_id = NULL,
+                    last_error = NULL,
+                    updated_at = ?
+                WHERE lead_id = ? AND status != 'converted'
+                """,
+                (now_text, lead_id),
+            ).rowcount
+            if changed:
+                self._event(
+                    connection,
+                    lead_id,
+                    "left_secondary_lead_scope",
+                    {"source": source},
+                )
+        return bool(changed)
 
     def _claim_due_classification(self) -> Optional[sqlite3.Row]:
         now_text = isoformat(self.now())
@@ -902,6 +897,12 @@ class SecondaryLeadScheduler:
                 FROM secondary_lead_state
                 WHERE status = 'settling'
                   AND classification_due_at <= ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM notes_follow_up_state notes
+                    WHERE notes.lead_id = secondary_lead_state.lead_id
+                      AND notes.status != 'superseded'
+                  )
                 ORDER BY
                   CASE
                     WHEN policy_version IS NOT NULL
@@ -973,7 +974,7 @@ class SecondaryLeadScheduler:
             status = "needs_review"
             next_action_at = None
             pause_reason = SALES_FOLLOW_UP_TIME_UNVERIFIED
-        elif confidence < threshold and self.human_review_enabled:
+        elif confidence < threshold:
             status = "needs_review"
             next_action_at = None
             pause_reason = "Classification confidence is below threshold"
@@ -1375,6 +1376,12 @@ class SecondaryLeadScheduler:
                 FROM secondary_lead_state
                 WHERE status = 'scheduled'
                   AND next_action_at <= ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM notes_follow_up_state notes
+                    WHERE notes.lead_id = secondary_lead_state.lead_id
+                      AND notes.status != 'superseded'
+                  )
                 ORDER BY next_action_at, lead_id
                 LIMIT 1
                 """,
@@ -1538,25 +1545,7 @@ class SecondaryLeadScheduler:
         lead_id = row["lead_id"]
         current = self._export_current_record(lead_id)
         if current is None:
-            now_text = isoformat(self.now())
-            with self._connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                connection.execute(
-                    """
-                    UPDATE secondary_lead_state
-                    SET status = 'converted',
-                        next_action_at = NULL,
-                        last_error = NULL,
-                        updated_at = ?
-                    WHERE lead_id = ?
-                    """,
-                    (now_text, lead_id),
-                )
-                self._event(
-                    connection,
-                    lead_id,
-                    "left_secondary_lead_scope",
-                )
+            self._convert_out_of_scope(lead_id, source="dispatch_recheck")
             return {"lead_id": lead_id, "status": "converted"}
         _, _, _, current_hash = self._record_identity(current)
         if current_hash != row["source_hash"]:
@@ -1608,9 +1597,6 @@ class SecondaryLeadScheduler:
 
         output = json.loads(analysis["result_json"])
         decision = analysis["decision"]
-        manual_confirmation_required = (
-            MANUAL_CONFIRMATION_WARNING in (output.get("warnings") or [])
-        )
         now_text = isoformat(self.now())
         if decision == "generated":
             channel = analysis["output_type"]
@@ -1684,42 +1670,6 @@ class SecondaryLeadScheduler:
                     "message_version_id": message_version_id,
                 },
             )
-        if (
-            decision == "generated"
-            and message_version_id is not None
-            and not self.human_review_enabled
-            and not manual_confirmation_required
-        ):
-            try:
-                self._auto_approve_message(
-                    message_version_id,
-                    "Human review disabled by HERMES_HUMAN_REVIEW_ENABLED",
-                )
-                status = "waiting_delivery"
-            except Exception as exc:
-                error = f"Automatic Outbox approval failed: {str(exc)[-3500:]}"
-                with self._connect() as connection:
-                    connection.execute("BEGIN IMMEDIATE")
-                    connection.execute(
-                        """
-                        UPDATE secondary_lead_state
-                        SET status = 'waiting_review',
-                            last_error = ?,
-                            updated_at = ?
-                        WHERE lead_id = ?
-                        """,
-                        (error, isoformat(self.now()), lead_id),
-                    )
-                    self._event(
-                        connection,
-                        lead_id,
-                        "automatic_approval_failed",
-                        {
-                            "message_version_id": message_version_id,
-                            "error": error,
-                        },
-                    )
-                status = "waiting_review"
         return {
             "lead_id": lead_id,
             "status": status,
@@ -1728,115 +1678,9 @@ class SecondaryLeadScheduler:
             "message_version_id": message_version_id,
         }
 
-    def _release_review_backlog(self) -> Dict[str, int]:
-        released_classifications = 0
-        approved_messages = 0
-        approval_failures = 0
-        if self.human_review_enabled:
-            return {
-                "released_classifications": released_classifications,
-                "approved_messages": approved_messages,
-                "approval_failures": approval_failures,
-            }
-        now = self.now()
-        now_text = isoformat(now)
-        with self._connect() as connection:
-            classification_rows = connection.execute(
-                """
-                SELECT lead_id, lead_type, last_classified_at
-                FROM secondary_lead_state
-                WHERE status = 'needs_review'
-                  AND lead_type IS NOT NULL
-                  AND last_classified_at IS NOT NULL
-                  AND last_generated_at IS NULL
-                  AND latest_message_version_id IS NULL
-                  AND COALESCE(last_error, '') != ?
-                ORDER BY last_classified_at, lead_id
-                """,
-                (SALES_FOLLOW_UP_TIME_UNVERIFIED,),
-            ).fetchall()
-            connection.execute("BEGIN IMMEDIATE")
-            for row in classification_rows:
-                due_at = parse_timestamp(row["last_classified_at"]) + timedelta(
-                    days=self._interval_days(row["lead_type"], row["lead_id"], 0)
-                )
-                next_action_at = isoformat(max(now, due_at))
-                cursor = connection.execute(
-                    """
-                    UPDATE secondary_lead_state
-                    SET status = 'scheduled',
-                        next_action_at = ?,
-                        last_error = NULL,
-                        updated_at = ?
-                    WHERE lead_id = ? AND status = 'needs_review'
-                    """,
-                    (next_action_at, now_text, row["lead_id"]),
-                )
-                if cursor.rowcount:
-                    released_classifications += 1
-                    self._event(
-                        connection,
-                        row["lead_id"],
-                        "classification_review_bypassed",
-                        {"next_action_at": next_action_at},
-                    )
-            message_rows = connection.execute(
-                """
-                SELECT lead_id, latest_message_version_id
-                FROM secondary_lead_state
-                WHERE status = 'waiting_review'
-                  AND latest_message_version_id IS NOT NULL
-                ORDER BY updated_at, lead_id
-                """
-            ).fetchall()
-        for row in message_rows:
-            try:
-                message = get_message(row["latest_message_version_id"])
-                original_output = message[4] if message is not None else {}
-                warnings = (
-                    original_output.get("warnings")
-                    if isinstance(original_output, dict)
-                    else []
-                )
-                if MANUAL_CONFIRMATION_WARNING in warnings:
-                    continue
-                self._auto_approve_message(
-                    row["latest_message_version_id"],
-                    "Review backlog released after human review was disabled",
-                )
-                approved_messages += 1
-            except Exception as exc:
-                approval_failures += 1
-                error = f"Automatic Outbox approval failed: {str(exc)[-3500:]}"
-                with self._connect() as connection:
-                    connection.execute("BEGIN IMMEDIATE")
-                    connection.execute(
-                        """
-                        UPDATE secondary_lead_state
-                        SET last_error = ?, updated_at = ?
-                        WHERE lead_id = ? AND status = 'waiting_review'
-                        """,
-                        (error, isoformat(self.now()), row["lead_id"]),
-                    )
-                    self._event(
-                        connection,
-                        row["lead_id"],
-                        "automatic_approval_failed",
-                        {
-                            "message_version_id": row["latest_message_version_id"],
-                            "error": error,
-                        },
-                    )
-        return {
-            "released_classifications": released_classifications,
-            "approved_messages": approved_messages,
-            "approval_failures": approval_failures,
-        }
-
     def dispatch_due(self, limit: int = 20) -> List[Dict[str, Any]]:
         if limit < 1 or limit > 500:
             raise RuntimeError("Dispatch limit must be between 1 and 500")
-        self._release_review_backlog()
         results = []
         for _ in range(limit):
             row = self._claim_due_action()
@@ -2229,6 +2073,36 @@ class SecondaryLeadScheduler:
                     )
             if allow_local_only and mode == "online":
                 remote = self._set_runtime_mode("online")
+            notes = None
+            notes_enabled = self.environment.get(
+                "HERMES_NOTES_ENABLED", "true"
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if (
+                mode == "online"
+                and notes_enabled
+                and self._scheduler_due("next_notes_scan_at")
+            ):
+                notes_interval_minutes = _validated_int(
+                    self.environment,
+                    "HERMES_NOTES_SCAN_MINUTES",
+                    10,
+                    1,
+                    1440,
+                )
+                try:
+                    notes = self.notes_processor.run()
+                except Exception as exc:
+                    notes = {"status": "error", "error": str(exc)[-1500:]}
+                finally:
+                    with self._connect() as connection:
+                        self._set_state(
+                            connection,
+                            "next_notes_scan_at",
+                            isoformat(
+                                self.now()
+                                + timedelta(minutes=notes_interval_minutes)
+                            ),
+                        )
             classification_batch_size = _validated_int(
                 self.environment,
                 "HERMES_CLASSIFICATION_BATCH_SIZE",
@@ -2246,6 +2120,7 @@ class SecondaryLeadScheduler:
                 "full_scan": full_scan,
                 "classifications": classifications,
                 "dispatched": dispatched,
+                "notes": notes,
             }
             self._record_run_finish(
                 run_id,
@@ -2279,12 +2154,28 @@ class SecondaryLeadScheduler:
                 if remote_retry_at:
                     scan_at = max(scan_at, remote_retry_at)
                 candidates.append(scan_at)
+            notes_enabled = self.environment.get(
+                "HERMES_NOTES_ENABLED", "true"
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if notes_enabled and runtime_mode != "local_only":
+                notes_scan_at = self._state(connection, "next_notes_scan_at")
+                candidates.append(
+                    parse_timestamp(notes_scan_at)
+                    if notes_scan_at
+                    else self.now()
+                )
             classification_row = connection.execute(
                 """
                 SELECT min(classification_due_at) AS due_at
                 FROM secondary_lead_state
                 WHERE status = 'settling'
                   AND classification_due_at IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM notes_follow_up_state notes
+                    WHERE notes.lead_id = secondary_lead_state.lead_id
+                      AND notes.status != 'superseded'
+                  )
                 """
             ).fetchone()
             if classification_row and classification_row["due_at"]:
@@ -2307,6 +2198,12 @@ class SecondaryLeadScheduler:
                 FROM secondary_lead_state
                 WHERE status = 'scheduled'
                   AND next_action_at IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM notes_follow_up_state notes
+                    WHERE notes.lead_id = secondary_lead_state.lead_id
+                      AND notes.status != 'superseded'
+                  )
                 """
             ).fetchone()
             if action_row and action_row["due_at"]:
@@ -2363,17 +2260,7 @@ class SecondaryLeadScheduler:
 
     def status(self, limit: int = 10) -> Dict[str, Any]:
         with self._connect() as connection:
-            counts = {
-                row["status"]: row["count"]
-                for row in connection.execute(
-                    """
-                    SELECT status, count(*) AS count
-                    FROM secondary_lead_state
-                    GROUP BY status
-                    ORDER BY status
-                    """
-                )
-            }
+            counts = self._queue_counts(connection)
             types = {
                 (row["lead_type"] or "unclassified"): row["count"]
                 for row in connection.execute(
@@ -2403,7 +2290,6 @@ class SecondaryLeadScheduler:
                 )
             }
         return {
-            "review": self.review_configuration(),
             "runtime": self._runtime_status(scheduler),
             "counts": counts,
             "lead_types": types,
@@ -2425,6 +2311,13 @@ class SecondaryLeadScheduler:
             raise RuntimeError(
                 f"Unknown queue status: {', '.join(sorted(invalid))}"
             )
+        notes_owned = """
+          EXISTS (
+            SELECT 1 FROM notes_follow_up_state notes
+            WHERE notes.lead_id = secondary_lead_state.lead_id
+              AND notes.status != 'superseded'
+          )
+        """
         where = ""
         parameters: List[Any] = []
         if selected:
@@ -2438,7 +2331,8 @@ class SecondaryLeadScheduler:
                 SELECT lead_id, lead_type, classification_confidence,
                        classification_reason, status, classification_due_at,
                        next_action_at, follow_up_count,
-                       latest_message_version_id, last_error, updated_at
+                       latest_message_version_id, last_error, updated_at,
+                       CASE WHEN {notes_owned} THEN 1 ELSE 0 END AS notes_owned
                 FROM secondary_lead_state
                 {where}
                 ORDER BY
@@ -2452,43 +2346,19 @@ class SecondaryLeadScheduler:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def preview_scheduled_inputs(
-        self,
-        limit: int = 5,
-        sort: str = "next_action",
-    ) -> List[Dict[str, Any]]:
-        if limit < 1 or limit > 20:
-            raise RuntimeError("Preview limit must be between 1 and 20")
-        order_by = {
-            "next_action": "next_action_at, lead_id",
-            "recently_classified": "last_classified_at DESC, lead_id",
-            "random": "random()",
-        }.get(sort)
-        if order_by is None:
-            raise RuntimeError(
-                "Preview sort must be next_action, recently_classified, or random"
-            )
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT *
+    @staticmethod
+    def _queue_counts(connection: sqlite3.Connection) -> Dict[str, int]:
+        return {
+            row["status"]: row["count"]
+            for row in connection.execute(
+                """
+                SELECT status, count(*) AS count
                 FROM secondary_lead_state
-                WHERE status = 'scheduled'
-                  AND lead_type IS NOT NULL
-                  AND next_action_at IS NOT NULL
-                ORDER BY {order_by}
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        inputs = []
-        for row in rows:
-            record = self._message_input(row)
-            schedule = record["secondary_lead_schedule"]
-            schedule["preview_mode"] = True
-            schedule["preview_effective_at"] = row["next_action_at"]
-            inputs.append(record)
-        return inputs
+                GROUP BY status
+                ORDER BY status
+                """
+            )
+        }
 
     @staticmethod
     def _json_value(value: Optional[str], fallback: Any) -> Any:
@@ -2608,17 +2478,7 @@ class SecondaryLeadScheduler:
         now_text = isoformat(self.now())
         horizon_text = isoformat(self.now() + timedelta(days=days))
         with self._connect() as connection:
-            counts = {
-                row["status"]: row["count"]
-                for row in connection.execute(
-                    """
-                    SELECT status, count(*) AS count
-                    FROM secondary_lead_state
-                    GROUP BY status
-                    ORDER BY status
-                    """
-                )
-            }
+            counts = self._queue_counts(connection)
             lead_types = {
                 (row["lead_type"] or "unclassified"): row["count"]
                 for row in connection.execute(
@@ -2634,10 +2494,20 @@ class SecondaryLeadScheduler:
                 """
                 SELECT
                   SUM(CASE WHEN status = 'settling'
-                    AND classification_due_at <= ? THEN 1 ELSE 0 END)
+                    AND classification_due_at <= ?
+                    AND NOT EXISTS (
+                      SELECT 1 FROM notes_follow_up_state notes
+                      WHERE notes.lead_id = secondary_lead_state.lead_id
+                        AND notes.status != 'superseded'
+                    ) THEN 1 ELSE 0 END)
                     AS classifications_due,
                   SUM(CASE WHEN status = 'scheduled'
-                    AND next_action_at <= ? THEN 1 ELSE 0 END)
+                    AND next_action_at <= ?
+                    AND NOT EXISTS (
+                      SELECT 1 FROM notes_follow_up_state notes
+                      WHERE notes.lead_id = secondary_lead_state.lead_id
+                        AND notes.status != 'superseded'
+                    ) THEN 1 ELSE 0 END)
                     AS actions_due
                 FROM secondary_lead_state
                 """,
@@ -2655,12 +2525,22 @@ class SecondaryLeadScheduler:
                       WHERE status = 'settling'
                         AND classification_due_at > ?
                         AND classification_due_at <= ?
+                        AND NOT EXISTS (
+                          SELECT 1 FROM notes_follow_up_state notes
+                          WHERE notes.lead_id = secondary_lead_state.lead_id
+                            AND notes.status != 'superseded'
+                        )
                       UNION ALL
                       SELECT next_action_at AS due_at, 'action' AS kind
                       FROM secondary_lead_state
                       WHERE status = 'scheduled'
                         AND next_action_at > ?
                         AND next_action_at <= ?
+                        AND NOT EXISTS (
+                          SELECT 1 FROM notes_follow_up_state notes
+                          WHERE notes.lead_id = secondary_lead_state.lead_id
+                            AND notes.status != 'superseded'
+                        )
                     )
                     GROUP BY substr(due_at, 1, 10), kind
                     ORDER BY date, kind
@@ -2693,7 +2573,6 @@ class SecondaryLeadScheduler:
             ]
         return {
             "generated_at": now_text,
-            "review": self.review_configuration(),
             "runtime": self._runtime_status(scheduler),
             "counts": counts,
             "lead_types": lead_types,
@@ -2759,10 +2638,43 @@ class SecondaryLeadScheduler:
                     [],
                 )
                 classifications.append(value)
+            notes_row = connection.execute(
+                """
+                SELECT latest_note_id, structural_state, status, decision,
+                       publication_type, publication_id, crm_snapshot_json,
+                       updated_at
+                FROM notes_follow_up_state
+                WHERE lead_id = ?
+                ORDER BY source_created_at DESC, updated_at DESC
+                LIMIT 1
+                """,
+                (lead_id,),
+            ).fetchone()
+            notes_follow_up = None
+            if notes_row is not None:
+                notes_record = self._json_value(
+                    notes_row["crm_snapshot_json"],
+                    {},
+                )
+                notes = notes_record.get("notes", [])
+                if not isinstance(notes, list):
+                    notes = []
+                notes_follow_up = {
+                    "latest_note_id": notes_row["latest_note_id"],
+                    "structural_state": notes_row["structural_state"],
+                    "status": notes_row["status"],
+                    "decision": notes_row["decision"],
+                    "publication_type": notes_row["publication_type"],
+                    "publication_id": notes_row["publication_id"],
+                    "note_count": len(notes),
+                    "notes": notes,
+                    "updated_at": notes_row["updated_at"],
+                }
         return {
             "state": state_value,
             "events": events,
             "classifications": classifications,
+            "notes_follow_up": notes_follow_up,
         }
 
 

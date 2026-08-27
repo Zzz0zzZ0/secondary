@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.conversation_actions import list_review_actions, resolve_review_action
 from app.message_jobs import DEFAULT_STATE_DIR
 from app.outbox import (
     approve_message,
@@ -27,7 +28,7 @@ from app.runtime_report import (
     list_reports,
     write_report,
 )
-from .service import manager, regenerate_review_message
+from .service import regenerate_review_message
 
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "review_web" / "dist"
@@ -44,11 +45,6 @@ def _polling_store() -> SecondaryLeadScheduler:
     )
 
 
-class StartRunRequest(BaseModel):
-    limit: int = Field(default=5, ge=1, le=20)
-    sort: Literal["next_action", "recently_classified", "random"] = "next_action"
-
-
 class ClassificationReviewRequest(BaseModel):
     lead_type: Literal[
         "no_current_demand",
@@ -63,11 +59,6 @@ class ClassificationReviewRequest(BaseModel):
 class LeadRetryRequest(BaseModel):
     actor: str = Field(default="review-ui", min_length=1, max_length=200)
     note: Optional[str] = Field(default=None, max_length=2000)
-
-
-class ReviewModeRequest(BaseModel):
-    enabled: bool
-    actor: str = Field(default="review-ui", min_length=1, max_length=200)
 
 
 class MessageEditRequest(BaseModel):
@@ -90,6 +81,12 @@ class MessageRegenerateRequest(BaseModel):
     reviewer: str = Field(default="review-ui", min_length=1, max_length=200)
 
 
+class ActionDecisionRequest(BaseModel):
+    decision: Literal["resolved", "dismissed"]
+    reviewer: str = Field(default="review-ui", min_length=1, max_length=200)
+    note: Optional[str] = Field(default=None, max_length=2000)
+
+
 @app.get("/api/health")
 def health():
     return {
@@ -99,53 +96,9 @@ def health():
     }
 
 
-@app.post("/api/runs", status_code=202)
-def start_run(request: StartRunRequest):
-    try:
-        inputs = _polling_store().preview_scheduled_inputs(
-            request.limit,
-            request.sort,
-        )
-        return manager.start(
-            request.limit,
-            request.sort,
-            inputs,
-            source="scheduled",
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.get("/api/runs/{run_id}")
-def get_run(run_id: str):
-    try:
-        return manager.get(run_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="测试任务不存在") from exc
-
-
-@app.get("/api/runs/{run_id}/results")
-def get_results(run_id: str):
-    try:
-        return {"run_id": run_id, "records": manager.results(run_id)}
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="测试任务不存在") from exc
-
-
 @app.get("/api/polling/status")
 def polling_status():
     return _polling_store().status()
-
-
-@app.post("/api/polling/review-mode")
-def set_polling_review_mode(request: ReviewModeRequest):
-    try:
-        return _polling_store().set_human_review_enabled(
-            request.enabled,
-            request.actor,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/polling/dashboard")
@@ -295,6 +248,30 @@ def review_messages(
         }
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/api/review/actions")
+def review_actions(
+    limit: int = Query(default=50, ge=1, le=200),
+    status: Literal["pending", "resolved", "dismissed"] = "pending",
+):
+    try:
+        return {"records": list_review_actions(limit, status)}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/review/actions/{action_id}/decision")
+def decide_review_action(action_id: str, request: ActionDecisionRequest):
+    try:
+        return resolve_review_action(
+            action_id,
+            request.decision,
+            request.reviewer,
+            request.note,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/outbox/deliveries")

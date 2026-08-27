@@ -17,7 +17,7 @@
 管理员只需通过安全渠道给每个消费者以下三项：
 
 ```dotenv
-OUTBOX_API_URL=http://192.168.112.178:8010
+OUTBOX_API_URL=http://<outbox-api-host>:8010
 OUTBOX_CONSUMER_TOKENS_JSON='{"replace-email-consumer-token":["email:email"],"replace-linkedin-consumer-token":["linkedin:linkedin"]}'
 OUTBOX_WORKER_ID=<由同事自行设置的稳定且唯一的名称>（这个自己写就行了，不重复就行）
 ```
@@ -48,8 +48,8 @@ curl "$OUTBOX_API_URL/ready"
 浏览器可打开以下地址查看在线接口定义，无需项目源码：
 
 ```text
-http://192.168.112.178:8010/docs
-http://192.168.112.178:8010/openapi.json
+http://<outbox-api-host>:8010/docs
+http://<outbox-api-host>:8010/openapi.json
 ```
 
 如果同事无法打开 `/health`，先确认 Outbox API 已启动、双方网络互通，并且 `8010`
@@ -130,20 +130,6 @@ LinkedIn 消费者至少检查：
 任务领取后，后续请求只提交 `worker_id`；`delivery_id` 已在 URL 中。服务端只检查任务仍处于
 `sending`，没有租约到期或续租机制。
 
-### 心跳兼容接口（无需调用）
-
-```bash
-curl -X POST "$OUTBOX_API_URL/v1/deliveries/$DELIVERY_ID/heartbeat" \
-  -H "Authorization: Bearer $OUTBOX_CONSUMER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"worker_id\": \"$OUTBOX_WORKER_ID\",
-    \"lease_token\": \"$LEASE_TOKEN\"
-  }"
-```
-
-该接口保留给旧消费者，但不会改变任务状态或处理时限。
-
 ### 平台明确确认发送成功
 
 ```bash
@@ -154,9 +140,6 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/$DELIVERY_ID/complete" \
     \"worker_id\": \"$OUTBOX_WORKER_ID\"
   }"
 ```
-
-现有消费者可以继续传 `provider_message_id` 和 `provider_thread_id`，API 会兼容接收，
-但 Outbox 不再保存这两个字段。新消费者可以将二者设为 `null` 或省略。
 
 ### 发送失败
 
@@ -169,13 +152,8 @@ curl -X POST "$OUTBOX_API_URL/v1/deliveries/$DELIVERY_ID/fail" \
   }"
 ```
 
-| result | 什么时候使用 |
-|---|---|
-| `retryable` | 明确没有发送，并且属于限流、服务端错误等可重试问题 |
-| `permanent` | 地址无效、任务内容非法等明确不应重试的问题 |
-| `unknown` | 超时、断线等导致“可能已发送但无法确认”的情况 |
-
-只要存在“可能已经发送”的可能，就必须使用 `unknown`，禁止自动重试。
+`fail` 是终态，不会自动重试。只有明确确认未发送时才调用；如果平台可能已经接受消息，
+应先按 `idempotency_key` 查询下游发送结果，禁止再次发送。
 
 ## 7. 可复制到同事项目中的 Python HTTP 封装
 
@@ -216,29 +194,15 @@ def claim():
     })["items"]
 
 
-def heartbeat(item):
-    return post(f"/v1/deliveries/{item['delivery_id']}/heartbeat", {
-        "worker_id": WORKER_ID,
-        "lease_token": item["lease_token"],
-    })
-
-
-def complete(item, message_id, thread_id=None):
+def complete(item):
     return post(f"/v1/deliveries/{item['delivery_id']}/complete", {
         "worker_id": WORKER_ID,
-        "lease_token": item["lease_token"],
-        "provider_message_id": message_id,
-        "provider_thread_id": thread_id,
     })
 
 
-def fail(item, result, code, message):
+def fail(item):
     return post(f"/v1/deliveries/{item['delivery_id']}/fail", {
         "worker_id": WORKER_ID,
-        "lease_token": item["lease_token"],
-        "result": result,
-        "error_code": code,
-        "error_message": message,
     })
 ```
 
@@ -247,8 +211,8 @@ def fail(item, result, code, message):
 ```text
 claim → 校验任务 → 按 idempotency_key 查重 → 调用发信平台
       → 明确成功：complete
-      → 明确未发送：fail(retryable/permanent)
-      → 无法确认是否发送：fail(unknown)
+      → 明确未发送：fail
+      → 无法确认是否发送：按 idempotency_key 查询，不重发
 ```
 
 ## 8. 幂等要求
@@ -267,8 +231,7 @@ claim → 校验任务 → 按 idempotency_key 查重 → 调用发信平台
 - [ ] 错误 Token 返回 `401`；
 - [ ] 消费者只领取授权的 channel/provider；
 - [ ] 能对成功任务调用 `complete`；
-- [ ] 能分别回报 `retryable`、`permanent`、`unknown`；
-- [ ] 长任务会调用 `heartbeat`；
+- [ ] 明确未发送的任务能调用 `fail`；
 - [ ] 已持久化 `idempotency_key`，不会重复发送；
 - [ ] 消费者日志不会打印 Token 或完整客户正文。
 

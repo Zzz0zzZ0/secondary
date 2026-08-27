@@ -3,7 +3,7 @@ set -euo pipefail
 
 PSQL_BIN="/opt/homebrew/opt/libpq/bin/psql"
 OUTPUT_PATH="${1:-./twenty_db_business_map.txt}"
-WORKSPACE_SCHEMA="${TWENTY_WORKSPACE_SCHEMA:-workspace_avv74ijhm70d2bh7o1toe4anv}"
+WORKSPACE_SCHEMA="${TWENTY_WORKSPACE_SCHEMA:-}"
 
 require_env() {
   local name="$1"
@@ -17,6 +17,7 @@ require_env TWENTY_DB_HOST
 require_env TWENTY_DB_PORT
 require_env TWENTY_DB_NAME
 require_env TWENTY_DB_USER
+require_env TWENTY_WORKSPACE_SCHEMA
 
 if [[ ! "$WORKSPACE_SCHEMA" =~ ^workspace_[a-z0-9]+$ ]]; then
   printf 'TWENTY_WORKSPACE_SCHEMA has an invalid format: %s\n' "$WORKSPACE_SCHEMA" >&2

@@ -46,4 +46,3 @@ def interval_days(lead_type: str, lead_id: str, sequence: int) -> int:
         f"{lead_id}:{lead_type}:{sequence}".encode("utf-8")
     ).hexdigest()
     return low + (int(seed[:8], 16) % (high - low + 1))
-

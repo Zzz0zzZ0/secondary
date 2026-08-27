@@ -13,7 +13,7 @@
 - `no_message`：现在不应联系，包括停止联系、跟进日期未到、频率过高或已达到无回复次数上限。
 - `cannot_generate`：关键身份/任务字段缺失、多客户混杂、目标无法确定，或消息本身无法安全改写。
 
-所有结果均设置 `review_required=true`。预览运行不导入 Outbox；正式调度生成的消息
+所有结果均设置 `review_required=true`。Review UI 不生成临时预览；正式调度生成的消息
 在 Review UI 中修改、重新生成、批准或拒绝，只有批准后才写入 delivery_outbox。
 只有人工批准且具备有效收件地址的 `generated` 消息才能进入 Outbox。
 

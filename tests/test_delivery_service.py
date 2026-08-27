@@ -118,7 +118,7 @@ class DeliveryStateTest(unittest.TestCase):
             item["sender_account_ref"],
         )
 
-    def test_system_test_claim_bypasses_recipient_cooldown_and_mutex(self):
+    def test_claim_always_enforces_recipient_cooldown_and_mutex(self):
         cursor = FakeCursor(fetchone_results=[None], fetchall_results=[[]])
 
         with patch.object(
@@ -129,29 +129,8 @@ class DeliveryStateTest(unittest.TestCase):
             delivery_service.claim_delivery("worker-1", ["email"], ["email"])
 
         sql = "\n".join(query for query, _ in cursor.calls)
-        self.assertEqual(2, sql.count("payload->>'lead_id' LIKE 'SYSTEM-TEST-%%'"))
-
-    def test_heartbeat_is_a_compatibility_noop(self):
-        cursor = FakeCursor(fetchone_results=[(1,)])
-
-        with patch.object(
-            delivery_service,
-            "connect",
-            return_value=FakeConnection(cursor),
-        ):
-            result = delivery_service.heartbeat_delivery(
-                uuid4(),
-                "worker-1",
-                "lease-token",
-            )
-
-        sql, params = cursor.calls[0]
-        self.assertNotIn("worker_id", sql)
-        self.assertNotIn("heartbeat_at", sql)
-        self.assertNotIn("worker-1", params)
-        self.assertNotIn("lease_token_hash", sql)
-        self.assertNotIn("lease_expires_at", sql)
-        self.assertTrue(result)
+        self.assertNotIn("SYSTEM-TEST-", sql)
+        self.assertEqual(2, sql.count("NOT EXISTS"))
 
     def test_failure_only_uses_delivery_id_and_worker_id(self):
         cursor = FakeCursor(fetchone_results=[(1,)])

@@ -28,12 +28,12 @@ prompt_value() {
 configure() {
   local db_host db_port db_name db_user db_sslmode workspace_schema export_limit
   local outbox_host outbox_port outbox_name outbox_user outbox_sslmode
-  prompt_value db_host "Twenty database host" "${TWENTY_DB_HOST:-192.168.112.72}"
+  prompt_value db_host "Twenty database host" "${TWENTY_DB_HOST:-crm-db.internal}"
   prompt_value db_port "PostgreSQL port" "${TWENTY_DB_PORT:-5432}"
   prompt_value db_name "Database name" "${TWENTY_DB_NAME:-default}"
   prompt_value db_user "Database user" "${TWENTY_DB_USER:-postgres}"
   prompt_value db_sslmode "SSL mode" "${TWENTY_DB_SSLMODE:-prefer}"
-  prompt_value workspace_schema "Twenty workspace schema" "${TWENTY_WORKSPACE_SCHEMA:-workspace_avv74ijhm70d2bh7o1toe4anv}"
+  prompt_value workspace_schema "Twenty workspace schema" "${TWENTY_WORKSPACE_SCHEMA:-workspace_replace_me}"
   prompt_value export_limit "Default record limit" "${TWENTY_EXPORT_LIMIT:-5}"
   prompt_value outbox_host "Outbox database host" "${OUTBOX_DB_HOST:-$db_host}"
   prompt_value outbox_port "Outbox PostgreSQL port" "${OUTBOX_DB_PORT:-5432}"
@@ -50,7 +50,6 @@ configure() {
     printf 'TWENTY_DB_SSLMODE=%q\n' "$db_sslmode"
     printf 'TWENTY_WORKSPACE_SCHEMA=%q\n' "$workspace_schema"
     printf 'TWENTY_EXPORT_LIMIT=%q\n' "$export_limit"
-    printf 'TWENTY_OUTPUT_CHANNEL=%q\n' "email"
     printf 'TWENTY_HERMES_RUNS_DIR=%q\n' "$RUNS_DIR"
     printf 'TWENTY_HERMES_REPORTS_DIR=%q\n' "$REPORTS_DIR"
     printf 'HERMES_COMMAND=%q\n' "$HOME/.local/bin/hermes"
@@ -98,33 +97,6 @@ setup_python() {
 outbox_migrate() {
   prompt_outbox_password
   python_cli migrate
-}
-
-outbox_list() {
-  prompt_outbox_password
-  python_cli list-messages
-  printf '\nQueued deliveries:\n'
-  python_cli list-outbox
-}
-
-outbox_approve() {
-  local message_id reviewer body_file subject
-  read -r -p 'Message version ID: ' message_id
-  prompt_outbox_password
-  python_cli show "$message_id"
-  local confirmation
-  read -r -p 'Type APPROVE to continue: ' confirmation
-  if [[ "$confirmation" != "APPROVE" ]]; then
-    printf 'Approval cancelled.\n'
-    return 0
-  fi
-  read -r -p 'Reviewer name: ' reviewer
-  read -r -p 'Optional replacement subject (Enter keeps original): ' subject
-  read -r -p 'Optional UTF-8 body file path (Enter keeps original): ' body_file
-  local args=(approve "$message_id" --reviewer "$reviewer" --yes)
-  [[ -z "$subject" ]] || args+=(--subject "$subject")
-  [[ -z "$body_file" ]] || args+=(--body-file "$body_file")
-  python_cli "${args[@]}"
 }
 
 ensure_config() {
@@ -225,9 +197,7 @@ menu() {
     printf '7) Open latest report\n'
     printf '8) Install Python dependencies\n'
     printf '9) Initialize/update Outbox database\n'
-    printf '10) List review messages and Outbox\n'
-    printf '11) Approve one message and enqueue it\n'
-    printf '12) Compare CRM and Skill product catalogs\n'
+    printf '10) Compare CRM and Skill product catalogs\n'
     printf '0) Exit\n'
     read -r -p 'Select: ' menu_choice
     case "$menu_choice" in
@@ -240,9 +210,7 @@ menu() {
       7) open_report ;;
       8) setup_python ;;
       9) outbox_migrate ;;
-      10) outbox_list ;;
-      11) outbox_approve ;;
-      12) compare_products ;;
+      10) compare_products ;;
       0) return 0 ;;
       *) printf 'Unknown selection.\n' ;;
     esac
@@ -264,11 +232,8 @@ case "${1:-menu}" in
   open) open_report ;;
   setup) setup_python ;;
   migrate) outbox_migrate ;;
-  queue) outbox_list ;;
-  approve) shift; prompt_outbox_password; python_cli approve "$@" ;;
-  show) shift; prompt_outbox_password; python_cli show "$@" ;;
   *)
-    printf 'Usage: %s [menu|configure|check|discover|export|products|run|report [RUN_DIR]|open|setup|migrate|queue|show ID|approve ...]\n' "$0" >&2
+    printf 'Usage: %s [menu|configure|check|discover|export|products|run|report [RUN_DIR]|open|setup|migrate]\n' "$0" >&2
     exit 2
     ;;
 esac

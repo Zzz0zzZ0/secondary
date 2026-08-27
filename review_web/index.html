@@ -12,10 +12,10 @@
         <div>
           <p class="eyebrow">Aceler International · Review Only</p>
           <h1>Hermes 消息审阅</h1>
-          <p id="review-mode-description">消息预览读取本地已排期线索，不改变排期、不写入 Outbox，也不会发送邮件。</p>
+          <p>集中查看待审消息、会话动作、二级线索状态和 Outbox 投递记录。</p>
         </div>
         <div class="hero-badges">
-          <button id="review-mode-toggle" class="safety review-toggle" type="button" disabled>审阅模式读取中</button>
+          <span class="safety">人工审阅固定开启</span>
           <span class="safety">页面发信已禁用</span>
         </div>
       </header>
@@ -95,17 +95,7 @@
       </section>
 
       <section class="control-panel">
-        <form id="run-form">
-          <label>预览数量<input id="limit" type="number" min="1" max="20" value="5" required /></label>
-          <div class="channel-rule"><span>生成渠道</span><strong>自动（邮箱优先）</strong></div>
-          <label>取样方式
-            <select id="sort">
-              <option value="next_action">最早排期</option>
-              <option value="recently_classified">最近分类</option>
-              <option value="random">随机抽样</option>
-            </select>
-          </label>
-          <button id="start-button" type="submit">从已排期线索生成预览</button>
+        <div class="review-controls">
           <button id="review-messages-button" type="button">审核待发送消息</button>
           <label class="filter">渠道
             <select id="review-channel-filter">
@@ -124,16 +114,16 @@
               <option value="">全部</option>
             </select>
           </label>
+          <button id="conversation-actions-button" type="button">处理会话动作</button>
           <button id="outbox-queue-button" type="button">查看 Outbox 投递队列</button>
           <button id="poll-queue-button" type="button">查看二级线索队列</button>
-        </form>
-        <div id="status" class="status" aria-live="polite">预览仅保存到本地审阅结果，不进入 Outbox</div>
+        </div>
+        <div id="status" class="status" aria-live="polite">请选择需要查看的队列</div>
       </section>
 
-      <section id="summary" class="summary hidden"></section>
       <section id="workspace" class="workspace hidden">
         <aside>
-          <div class="section-title"><h2 id="record-list-title">生成结果</h2><span id="record-count"></span></div>
+          <div class="section-title"><h2 id="record-list-title">审阅内容</h2><span id="record-count"></span></div>
           <div id="record-list" class="record-list"></div>
         </aside>
         <article id="detail" class="detail"></article>

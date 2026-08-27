@@ -230,4 +230,19 @@ def validate_classification(
             "name": name,
             "evidence_quote": quote,
         }
+    raw_type = lead.get("raw_type")
+    raw_types = raw_type if isinstance(raw_type, list) else [raw_type]
+    if "SMALL_QUANTITY" in raw_types:
+        model_lead_type = candidate["lead_type"]
+        candidate["classification_source"] = "crm.person.leadtype"
+        if model_lead_type != "below_moq":
+            candidate["model_lead_type"] = model_lead_type
+            candidate["model_reason"] = candidate["reason"]
+            candidate["lead_type"] = "below_moq"
+            candidate["reason"] = (
+                "CRM 结构化 leadtype=SMALL_QUANTITY，按销售人工分类归为"
+                "订量不够；Hermes 原分类已保留在 model_lead_type。"
+            )
+            candidate["recommended_by"] = []
+            candidate["referral_relationship"] = None
     return candidate

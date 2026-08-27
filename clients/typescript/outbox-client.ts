@@ -51,13 +51,6 @@ export class OutboxClient {
     return result.items;
   }
 
-  heartbeat(item: Delivery, workerId: string) {
-    return this.post(`/v1/deliveries/${item.delivery_id}/heartbeat`, {
-      worker_id: workerId,
-      lease_token: item.lease_token,
-    });
-  }
-
   complete(
     item: Delivery,
     workerId: string,

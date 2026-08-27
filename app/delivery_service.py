@@ -33,28 +33,22 @@ def claim_delivery(worker_id, channels, providers):
                 AND status IN ('queued', 'retry_wait')
                 AND available_at <= now()
                 AND attempt_count < max_attempts
-                AND (
-                  delivery_outbox.payload->>'lead_id' LIKE 'SYSTEM-TEST-%%'
-                  OR NOT EXISTS (
-                    SELECT 1
-                    FROM sales_automation.delivery_outbox active
-                    WHERE active.channel = delivery_outbox.channel
-                      AND lower(active.recipient_original) =
-                          lower(delivery_outbox.recipient_original)
-                      AND active.status = 'sending'
-                  )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM sales_automation.delivery_outbox active
+                  WHERE active.channel = delivery_outbox.channel
+                    AND lower(active.recipient_original) =
+                        lower(delivery_outbox.recipient_original)
+                    AND active.status = 'sending'
                 )
-                AND (
-                  delivery_outbox.payload->>'lead_id' LIKE 'SYSTEM-TEST-%%'
-                  OR NOT EXISTS (
-                    SELECT 1
-                    FROM sales_automation.delivery_outbox prior
-                    WHERE prior.channel = delivery_outbox.channel
-                      AND lower(prior.recipient_original) =
-                          lower(delivery_outbox.recipient_original)
-                      AND prior.status = 'sent'
-                      AND prior.sent_at > now() - (%s * interval '1 hour')
-                  )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM sales_automation.delivery_outbox prior
+                  WHERE prior.channel = delivery_outbox.channel
+                    AND lower(prior.recipient_original) =
+                        lower(delivery_outbox.recipient_original)
+                    AND prior.status = 'sent'
+                    AND prior.sent_at > now() - (%s * interval '1 hour')
                 )
                 AND pg_try_advisory_xact_lock(
                   hashtextextended(
@@ -110,21 +104,6 @@ def claim_delivery(worker_id, channels, providers):
                 "attempt_no": row[8],
             },
         }
-
-
-def heartbeat_delivery(delivery_id, worker_id, lease_token):
-    with connect() as conn, conn.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT 1
-            FROM sales_automation.delivery_outbox
-            WHERE id = %s
-              AND status = 'sending'
-            """,
-            (delivery_id,),
-        )
-        row = cursor.fetchone()
-        return row is not None
 
 
 def complete_delivery(

@@ -13,6 +13,48 @@ from review_api.service import _hermes_environment
 
 
 class SecondaryReferralTest(unittest.TestCase):
+    def test_structured_small_quantity_overrides_model_lead_type(self):
+        note = "客户每年需要一吨，CRM 已由销售标记为订量不够。"
+        candidate = self._candidate("recommender", "Colleague", note)
+        candidate["lead_type"] = "unknown_demand"
+        candidate["recommended_by"] = []
+        candidate["referral_relationship"] = None
+        candidate["message_evidence"] = {
+            "status": "sufficient",
+            "customer_action_quote": "客户每年需要一吨",
+            "business_detail_quote": "客户每年需要一吨",
+            "reason": "客户数量有原文依据。",
+        }
+        record = self._record("Customer", note)
+        record["lead"]["raw_type"] = ["SMALL_QUANTITY"]
+
+        validated = validate_classification(candidate, record)
+
+        self.assertEqual("below_moq", validated["lead_type"])
+        self.assertEqual("unknown_demand", validated["model_lead_type"])
+        self.assertEqual(
+            "crm.person.leadtype",
+            validated["classification_source"],
+        )
+
+    def test_below_moq_sales_reply_does_not_continue_product_follow_up(self):
+        note = "销售已发送当前产品资料。"
+        record = self._record("Customer", note)
+        record["lead"]["raw_type"] = ["SMALL_QUANTITY"]
+        prepared = prepare_message_record(
+            record,
+            {
+                "lead_type": "unknown_demand",
+                "message_evidence": {"status": "sufficient"},
+                "sales_follow_up_context": {
+                    "status": "information_sent",
+                    "evidence_quote": note,
+                },
+            },
+        )
+
+        self.assertEqual("default", prepared["message_route"])
+
     def test_hermes_environment_removes_ipv6_proxy_bypass_tokens(self):
         old = os.environ.get("NO_PROXY")
         try:
@@ -178,6 +220,19 @@ class SecondaryReferralTest(unittest.TestCase):
         )
         self.assertNotIn("internal_note", prepared["lead"])
 
+    def test_verified_customer_email_routes_to_email_reply(self):
+        record = {
+            "lead": {"id": "lead-1"},
+            "notes_experiment": True,
+            "review_context": {
+                "crm_email_evidence": {
+                    "evidence_quote": "Please send the requested documents.",
+                },
+            },
+        }
+
+        self.assertEqual(message_route(record, None), "email_reply")
+
     def test_sales_reply_requires_exact_crm_quote(self):
         candidate = self._candidate("recommender", "Colleague", "KP")
         candidate["sales_follow_up_context"] = {
@@ -205,7 +260,7 @@ class SecondaryReferralTest(unittest.TestCase):
         )
         self.assertEqual(prepared["message_route"], "referral_review")
 
-    def test_recommender_cannot_ask_product_need(self):
+    def test_recommender_meaning_is_not_inferred_from_question_words(self):
         crm_input = {
             "lead": {"id": "lead-1"},
             "output": {"type": "linkedin"},
@@ -227,12 +282,9 @@ class SecondaryReferralTest(unittest.TestCase):
             "reason": "感谢推荐并避免询问产品需求。",
             "review_required": True,
         }
-        self.assertIn(
-            "推荐人消息不得询问产品需求",
-            validation_errors(candidate, crm_input, "lead-1"),
-        )
+        self.assertEqual(validation_errors(candidate, crm_input, "lead-1"), [])
 
-    def test_conversation_follow_up_cannot_invent_inquiry(self):
+    def test_follow_up_meaning_is_not_inferred_from_phrase_blacklists(self):
         crm_input = {
             "lead": {"id": "lead-1"},
             "output": {"type": "email"},
@@ -259,10 +311,7 @@ class SecondaryReferralTest(unittest.TestCase):
             "review_required": True,
         }
 
-        self.assertIn(
-            "简短跟进不得虚构客户询盘或兴趣",
-            validation_errors(candidate, crm_input, "lead-1"),
-        )
+        self.assertEqual(validation_errors(candidate, crm_input, "lead-1"), [])
 
     def test_grounded_referral_normalizes_insufficient_message_evidence(self):
         note = "Nathan 由 Sujal Khatiwada 推荐。"
@@ -293,7 +342,7 @@ class SecondaryReferralTest(unittest.TestCase):
         )
         self.assertNotIn("recommended_by", prepared["lead"])
 
-    def test_exact_crm_sender_map_overrides_conversation_name(self):
+    def test_conversation_name_overrides_crm_sender_map_for_reply_signature(self):
         crm_input = {
             "lead": {"id": "lead-1"},
             "output": {"type": "email"},
@@ -307,8 +356,8 @@ class SecondaryReferralTest(unittest.TestCase):
             "content": {
                 "subject": "Subject",
                 "subject_zh": "主题",
-                "body": "Hello,\n\nBest regards,\nChloe\nAceler International",
-                "body_zh": "您好，\n\n此致，\nChloe\nAceler International",
+                "body": "Hello,\n\nBest regards,\nHangke\nAceler International",
+                "body_zh": "您好，\n\n此致，\nHangke\nAceler International",
             },
             "message_goal": "跟进",
             "information_requested": [],
@@ -319,7 +368,7 @@ class SecondaryReferralTest(unittest.TestCase):
 
         self.assertEqual(validation_errors(candidate, crm_input, "lead-1"), [])
 
-    def test_message_reason_must_be_simplified_chinese(self):
+    def test_reason_language_is_not_guessed_from_character_ranges(self):
         crm_input = {
             "lead": {"id": "lead-1"},
             "output": {"type": "email"},
@@ -342,10 +391,7 @@ class SecondaryReferralTest(unittest.TestCase):
             "review_required": True,
         }
 
-        self.assertIn(
-            "判断理由必须使用简体中文",
-            validation_errors(candidate, crm_input, "lead-1"),
-        )
+        self.assertEqual(validation_errors(candidate, crm_input, "lead-1"), [])
 
     def test_insufficient_crm_evidence_creates_review_only_draft(self):
         crm_input = prepare_message_record(

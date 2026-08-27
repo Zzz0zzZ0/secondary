@@ -38,12 +38,6 @@ class OutboxClient:
             },
         )["items"]
 
-    def heartbeat(self, item, worker_id):
-        return self._post(
-            f"/v1/deliveries/{item['delivery_id']}/heartbeat",
-            {"worker_id": worker_id, "lease_token": item["lease_token"]},
-        )
-
     def complete(self, item, worker_id):
         return self._post(
             f"/v1/deliveries/{item['delivery_id']}/complete",

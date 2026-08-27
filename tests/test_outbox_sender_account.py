@@ -37,7 +37,7 @@ class FakeConnection:
         return self._cursor
 
 
-def pending_message(channel, recipient, sales_name):
+def pending_message(channel, recipient, sales_name, **crm_fields):
     output = {
         "language": "English",
         "content": {
@@ -49,7 +49,7 @@ def pending_message(channel, recipient, sales_name):
         uuid4(),
         "lead-1",
         recipient,
-        {"sales": {"name": sales_name}},
+        {"sales": {"name": sales_name}, **crm_fields},
         output,
         None,
         "pending_review",
@@ -108,6 +108,34 @@ class OutboxSenderAccountTest(unittest.TestCase):
                 with patch.object(outbox, "_json", side_effect=lambda value: value):
                     with patch.object(outbox, "notify_secondary_outbox_event"):
                         outbox.approve_message(cursor.row[0], "reviewer")
+
+    def test_notes_experiment_cannot_be_approved(self):
+        cursor = FakeCursor(
+            pending_message(
+                "email",
+                "customer@example.com",
+                "倩文 于",
+                notes_experiment=True,
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "cannot be approved"):
+            with patch.object(outbox, "connect", return_value=FakeConnection(cursor)):
+                outbox.approve_message(cursor.row[0], "reviewer")
+
+    def test_notes_review_only_cannot_be_approved(self):
+        cursor = FakeCursor(
+            pending_message(
+                "email",
+                "customer@example.com",
+                "倩文 于",
+                notes_review_only=True,
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "review-only"):
+            with patch.object(outbox, "connect", return_value=FakeConnection(cursor)):
+                outbox.approve_message(cursor.row[0], "reviewer")
 
 
 if __name__ == "__main__":

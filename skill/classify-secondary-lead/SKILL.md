@@ -28,6 +28,11 @@ but does not contain enough evidence for another category. Never classify a
 contact as `referred` merely because a name occurs in a note. Never invent an MOQ
 or decide that a quantity is insufficient without explicit CRM evidence.
 
+`lead.raw_type` is a structured CRM field entered by sales. When it contains
+`SMALL_QUANTITY`, classify the record as `below_moq`; do not reinterpret it as
+`unknown_demand` from the free-text note. The application also enforces this
+mapping and preserves a differing model result for audit.
+
 If the legacy lifecycle is `NO_DEMAND`, it is evidence for
 `no_current_demand`, unless a newer explicit statement in the same record shows
 that demand has reopened.

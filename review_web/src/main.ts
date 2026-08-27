@@ -1,25 +1,6 @@
 import "./styles.css";
 
 type Json = Record<string, any>;
-type RunState = {
-  run_id: string;
-  status: "running" | "completed" | "failed";
-  total: number;
-  completed: number;
-  valid: number;
-  invalid: number;
-  error?: string;
-};
-type RecordResult = {
-  lead_id: string;
-  pipeline_status: string;
-  input: Json;
-  output: Json | null;
-  candidate_output?: Json | null;
-  validation_errors?: string[];
-  usage: Json;
-  raw_output: string;
-};
 type ReviewMessage = {
   id: string;
   run_id: string;
@@ -35,6 +16,19 @@ type ReviewMessage = {
   created_at: string;
   updated_at: string;
 };
+type ConversationAction = {
+  id: string;
+  run_id: string;
+  lead_id: string;
+  action_type: "internal_task" | "manual_review";
+  crm_snapshot: Json;
+  analysis: Json;
+  status: "pending" | "resolved" | "dismissed";
+  handled_by: string | null;
+  resolution_note: string | null;
+  created_at: string;
+  updated_at: string;
+};
 type QueueRecord = {
   lead_id: string;
   lead_type: string | null;
@@ -47,6 +41,7 @@ type QueueRecord = {
   latest_message_version_id: string | null;
   last_error: string | null;
   updated_at: string;
+  notes_owned?: number;
 };
 type OutboxDelivery = {
   id: string;
@@ -87,11 +82,6 @@ type SchedulerRun = {
   };
   error: string | null;
 };
-type ReviewConfiguration = {
-  enabled: boolean;
-  mode: "manual" | "automatic";
-  auto_reviewer: string | null;
-};
 type RuntimeStatus = {
   mode: "online" | "local_only" | "unknown";
   last_checked_at: string | null;
@@ -105,7 +95,6 @@ const scanKindLabels: Record<string, string> = {
 };
 type DashboardData = {
   generated_at: string;
-  review: ReviewConfiguration;
   runtime: RuntimeStatus;
   counts: Record<string, number>;
   lead_types: Record<string, number>;
@@ -156,12 +145,19 @@ type LeadDetail = {
     policy_version: string;
     classified_at: string;
   }>;
+  notes_follow_up: {
+    latest_note_id: string;
+    structural_state: string;
+    status: string;
+    decision: string | null;
+    publication_type: string | null;
+    publication_id: string | null;
+    note_count: number;
+    notes: Json[];
+    updated_at: string;
+  } | null;
 };
 
-const form = document.querySelector<HTMLFormElement>("#run-form")!;
-const limitInput = document.querySelector<HTMLInputElement>("#limit")!;
-const sortInput = document.querySelector<HTMLSelectElement>("#sort")!;
-const startButton = document.querySelector<HTMLButtonElement>("#start-button")!;
 const reviewMessagesButton = document.querySelector<HTMLButtonElement>(
   "#review-messages-button",
 )!;
@@ -175,12 +171,14 @@ const reviewRouteFilter = document.querySelector<HTMLSelectElement>(
   "#review-route-filter",
 )!;
 let pendingReviewAll: ReviewMessage[] = [];
+const conversationActionsButton = document.querySelector<HTMLButtonElement>(
+  "#conversation-actions-button",
+)!;
 const outboxQueueButton = document.querySelector<HTMLButtonElement>(
   "#outbox-queue-button",
 )!;
 const pollQueueButton = document.querySelector<HTMLButtonElement>("#poll-queue-button")!;
 const statusBox = document.querySelector<HTMLElement>("#status")!;
-const summary = document.querySelector<HTMLElement>("#summary")!;
 const workspace = document.querySelector<HTMLElement>("#workspace")!;
 const recordList = document.querySelector<HTMLElement>("#record-list")!;
 const recordCount = document.querySelector<HTMLElement>("#record-count")!;
@@ -196,8 +194,6 @@ const upcomingChart = document.querySelector<HTMLElement>("#upcoming-chart")!;
 const upcomingTotal = document.querySelector<HTMLElement>("#upcoming-total")!;
 const runHistory = document.querySelector<HTMLElement>("#run-history")!;
 const recentEvents = document.querySelector<HTMLElement>("#recent-events")!;
-const reviewModeToggle = document.querySelector<HTMLButtonElement>("#review-mode-toggle")!;
-const reviewModeDescription = document.querySelector<HTMLElement>("#review-mode-description")!;
 const runtimeReportStatus = document.querySelector<HTMLElement>("#runtime-report-status")!;
 const runtimeReportDate = document.querySelector<HTMLSelectElement>("#runtime-report-date")!;
 const runtimeReportJson = document.querySelector<HTMLAnchorElement>("#runtime-report-json")!;
@@ -205,7 +201,6 @@ const runtimeReportMarkdown = document.querySelector<HTMLAnchorElement>("#runtim
 const runtimeReportGenerate = document.querySelector<HTMLButtonElement>("#runtime-report-generate")!;
 const runtimeReportRefresh = document.querySelector<HTMLButtonElement>("#runtime-report-refresh")!;
 const runtimeReportContent = document.querySelector<HTMLElement>("#runtime-report-content")!;
-let currentReviewEnabled: boolean | null = null;
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -220,24 +215,15 @@ function text(value: unknown, fallback = "—"): string {
   return String(value);
 }
 
-const decisionLabels: Record<string, string> = {
-  generated: "已生成",
-  no_message: "不发送",
-  cannot_generate: "无法生成",
-  invalid: "非法输出",
-  processing: "处理中",
-};
-const languageLabels: Record<string, string> = {
-  English: "英语",
-  Chinese: "中文",
-  Japanese: "日语",
-  French: "法语",
-  German: "德语",
-  Spanish: "西班牙语",
-  Italian: "意大利语",
-  Portuguese: "葡萄牙语",
-  Russian: "俄语",
-};
+function emailHistoryText(history: unknown): string {
+  if (!Array.isArray(history)) return "";
+  return history.map((note, index) => {
+    const direction = note.direction === "FA" ? "销售发信" : "客户来信";
+    const time = note.email_at ? formatDateTime(note.email_at) : "邮件时间未知";
+    return `${index + 1}. ${direction} · ${time} · ${text(note.subject)}\n${text(note.body)}`;
+  }).join("\n\n──────────\n\n");
+}
+
 const warningLabels: Record<string, string> = {
   CONTACT_CHANNEL_MISSING: "未在CRM检测到邮箱或者领英",
   SELECTED_CHANNEL_MISSING: "缺少所选渠道地址",
@@ -260,14 +246,24 @@ const warningLabels: Record<string, string> = {
   SALES_NAME_TRANSLITERATED: "销售姓名已按拼音转换",
   SALES_NAME_TRANSLITERATION_UNCERTAIN: "销售姓名拼音需人工核对",
   DO_NOT_CONTACT: "客户明确要求不要联系",
+  NOTES_EXPERIMENT_REQUIRES_MANUAL_REVIEW: "历史 Notes 实验消息，仅供人工审阅",
+  NOTES_REVIEW_ONLY_REQUIRES_MANUAL_REVIEW: "Notes 邮件消息，仅供人工审阅",
 };
 const messageRouteLabels: Record<string, string> = {
+  email_reply: "客户邮件待回复",
   recommender_thanks: "推荐人待感谢",
   referred_intro: "被推荐人待联系",
   qualification: "需求待确认",
   conversation_follow_up: "已沟通待跟进",
   referral_review: "推荐关系待核对",
   default: "按原分类处理",
+};
+const conversationActionLabels: Record<string, string> = {
+  reply: "直接回复",
+  internal_task: "内部待办",
+  referral: "转介绍感谢",
+  no_action: "无需发送",
+  manual_review: "人工判断",
 };
 const leadTypeLabels: Record<string, string> = {
   no_current_demand: "暂无需求",
@@ -287,6 +283,16 @@ const queueStatusLabels: Record<string, string> = {
   paused: "已暂停",
   converted: "已转出",
   failed: "失败",
+};
+const notesStatusLabels: Record<string, string> = {
+  pending: "待分析",
+  processing: "分析中",
+  retry_wait: "等待重试",
+  completed: "已处理",
+  baseline: "历史基线",
+  skipped: "等待客户",
+  failed: "处理失败",
+  superseded: "已被新邮件替代",
 };
 const outboxStatusLabels: Record<string, string> = {
   queued: "待投递",
@@ -344,21 +350,6 @@ function queueStatusText(record: QueueRecord): string {
   return queueStatusLabels[record.status] || record.status;
 }
 
-function renderReviewMode(review: ReviewConfiguration) {
-  currentReviewEnabled = review.enabled;
-  reviewModeToggle.textContent = review.enabled
-    ? "人工审阅：开启"
-    : "人工审阅：关闭";
-  reviewModeToggle.classList.toggle("automatic", !review.enabled);
-  reviewModeToggle.disabled = false;
-  reviewModeToggle.title = review.enabled
-    ? "点击关闭人工审阅"
-    : "点击开启人工审阅";
-  reviewModeDescription.textContent = review.enabled
-    ? "预览只读取已排期线索，不改排期、不进 Outbox。自动调度生成的正式消息仍等待人工批准。"
-    : "预览只读取已排期线索，不改排期、不进 Outbox。自动调度生成的正式消息会自动批准，实际发送仍受投递安全开关控制。";
-}
-
 function renderRuntimeMode(runtime: RuntimeStatus) {
   runtimeMode.className = `runtime-mode ${runtime.mode}`;
   runtimeMode.removeAttribute("title");
@@ -379,7 +370,6 @@ function renderRuntimeMode(runtime: RuntimeStatus) {
 }
 
 function renderDashboard(data: DashboardData) {
-  renderReviewMode(data.review);
   renderRuntimeMode(data.runtime);
   const total = Object.values(data.counts).reduce((sum, value) => sum + value, 0);
   const attention = countFor(data.counts, ["needs_review", "needs_contact", "failed"]);
@@ -655,11 +645,6 @@ async function loadRuntimeReports() {
   }
 }
 
-function decisionText(value: unknown): string {
-  const key = text(value, "processing");
-  return decisionLabels[key] || key;
-}
-
 function warningText(value: unknown): string {
   if (!Array.isArray(value)) return text(value);
   return value.map((item) => warningLabels[String(item)] || String(item)).join("；") || "—";
@@ -668,27 +653,6 @@ function warningText(value: unknown): string {
 function setStatus(message: string, kind = "") {
   statusBox.textContent = message;
   statusBox.className = `status ${kind}`.trim();
-}
-
-function renderSummary(run: RunState) {
-  const items = [
-    ["总记录", run.total],
-    ["已完成", run.completed],
-    ["有效结果", run.valid],
-    ["无效结果", run.invalid],
-  ];
-  summary.replaceChildren(
-    ...items.map(([label, value]) => {
-      const item = document.createElement("div");
-      const strong = document.createElement("strong");
-      const span = document.createElement("span");
-      strong.textContent = String(value);
-      span.textContent = String(label);
-      item.append(strong, span);
-      return item;
-    }),
-  );
-  summary.classList.remove("hidden");
 }
 
 function badge(label: string, className = ""): HTMLElement {
@@ -716,144 +680,6 @@ function block(title: string, content: unknown): HTMLElement {
   pre.textContent = text(content);
   section.append(heading, pre);
   return section;
-}
-
-function renderProducts(products: Json[]): HTMLElement {
-  const section = document.createElement("section");
-  const heading = document.createElement("h3");
-  heading.textContent = `产品需求（${products.length}）`;
-  section.append(heading);
-  if (!products.length) {
-    const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "此记录没有结构化产品需求";
-    section.append(empty);
-    return section;
-  }
-  products.forEach((product, index) => {
-    const card = document.createElement("div");
-    card.className = "product";
-    const title = document.createElement("strong");
-    title.textContent = text(product.product_name_en || product.product_name || product.name, `产品 ${index + 1}`);
-    const dl = document.createElement("dl");
-    [
-      ["规格", product.specification],
-      ["粒度", product.size],
-      ["数量", product.quantity],
-      ["用途", product.application],
-      ["包装", product.packaging],
-      ["目的地", product.destination],
-      ["贸易条款", product.incoterm],
-      ["备注", product.remark],
-    ].forEach(([key, value]) => dl.append(field(String(key), value)));
-    card.append(title, dl);
-    section.append(card);
-  });
-  return section;
-}
-
-function renderDetail(record: RecordResult) {
-  const input = record.input || {};
-  const lead = input.lead || {};
-  const schedule = input.secondary_lead_schedule || {};
-  const company = input.company || {};
-  const contact = input.contact || {};
-  const sales = input.sales || {};
-  const output = record.output;
-  const candidate = record.candidate_output;
-  const displayOutput = output || candidate;
-
-  const crmPanel = document.createElement("div");
-  crmPanel.className = "panel";
-  const crmTitle = document.createElement("div");
-  crmTitle.className = "panel-heading";
-  const crmH2 = document.createElement("h2");
-  crmH2.textContent = "CRM 输入依据";
-  crmTitle.append(crmH2, badge(text(lead.type), "neutral"));
-  const crmFields = document.createElement("dl");
-  [
-    ["公司", company.name],
-    ["联系人", contact.name],
-    ["职位", contact.job_title],
-    ["联系地址", contact.email || contact.linkedin_url],
-    ["销售", sales.name],
-    ["生成渠道", input.output?.type === "email" ? "邮件" : "LinkedIn"],
-    ["二级分类", schedule.lead_type_label],
-    ["原排期", formatDateTime(schedule.next_action_at)],
-    ["最近更新", lead.updated_at],
-    ["最近跟进", lead.last_follow_up_at],
-  ].forEach(([key, value]) => crmFields.append(field(String(key), value)));
-  crmPanel.append(
-    crmTitle,
-    crmFields,
-    renderProducts(Array.isArray(lead.product_demands) ? lead.product_demands : []),
-    block(
-      "CRM 内文本",
-      input.review_context?.crm_internal_note || lead.internal_note,
-    ),
-    block("公司背调", company.research_text),
-  );
-
-  const outputPanel = document.createElement("div");
-  outputPanel.className = "panel output-panel";
-  const outputTitle = document.createElement("div");
-  outputTitle.className = "panel-heading";
-  const outputH2 = document.createElement("h2");
-  outputH2.textContent = "Hermes 生成结果";
-  const decision = output?.decision || (candidate ? "invalid" : record.pipeline_status);
-  outputTitle.append(outputH2, badge(decisionText(decision), decision));
-  outputPanel.append(outputTitle);
-
-  if (!displayOutput) {
-    outputPanel.append(block("处理说明", record.raw_output ? "Hermes返回无法解析，未通过系统校验。" : "尚在处理"));
-  } else {
-    const meta = document.createElement("dl");
-    [
-      ["语言", languageLabels[displayOutput.language] || displayOutput.language],
-      ["消息目标", displayOutput.message_goal],
-      ["需要补充", displayOutput.information_requested],
-      ["内部提醒", warningText(displayOutput.warnings)],
-      ["判断原因", displayOutput.reason],
-    ].forEach(([key, value]) => meta.append(field(String(key), value)));
-    outputPanel.append(meta);
-    if (record.validation_errors?.length) {
-      outputPanel.append(block("非法输出原因", record.validation_errors.join("；")));
-    }
-    if (displayOutput.content?.subject) outputPanel.append(block("邮件主题（客户语言）", displayOutput.content.subject));
-    if (displayOutput.content?.subject_zh) outputPanel.append(block("邮件主题（中文对照）", displayOutput.content.subject_zh));
-    if (displayOutput.content?.body) outputPanel.append(block(output ? "客户可见正文（目标语言）" : "非法候选正文（不可发送）", displayOutput.content.body));
-    if (displayOutput.content?.body_zh) outputPanel.append(block("中文对照（仅供审阅）", displayOutput.content.body_zh));
-  }
-  detail.replaceChildren(crmPanel, outputPanel);
-}
-
-function renderRecords(records: RecordResult[]) {
-  recordList.replaceChildren();
-  detail.replaceChildren();
-  recordListTitle.textContent = "生成结果";
-  recordCount.textContent = `${records.length} 条`;
-  records.forEach((record, index) => {
-    const company = record.input?.company?.name;
-    const contact = record.input?.contact?.name;
-    const leadType = record.input?.lead?.type;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "record-item";
-    const title = document.createElement("strong");
-    const subtitle = document.createElement("span");
-    title.textContent = text(company, "未知公司");
-    subtitle.textContent = `${text(contact, "未知联系人")} · ${text(leadType, "未知类型")}`;
-    const decision = record.output?.decision || (record.candidate_output ? "invalid" : record.pipeline_status);
-    button.append(title, subtitle, badge(decisionText(decision), decision));
-    button.addEventListener("click", () => {
-      recordList.querySelectorAll(".active").forEach((node) => node.classList.remove("active"));
-      button.classList.add("active");
-      renderDetail(record);
-    });
-    recordList.append(button);
-    if (index === 0) button.click();
-  });
-  workspace.classList.remove("hidden");
 }
 
 function renderReviewMessageDetail(message: ReviewMessage) {
@@ -886,6 +712,10 @@ function renderReviewMessageDetail(message: ReviewMessage) {
     ["销售", sales.name],
     ["渠道", message.channel === "email" ? "邮件" : "LinkedIn"],
     ["处理路由", messageRouteLabels[snapshot.message_route] || snapshot.message_route],
+    [
+      "会话动作",
+      conversationActionLabels[snapshot.conversation_action] || snapshot.conversation_action,
+    ],
     ["消息版本", message.version],
     ["生成时间", formatDateTime(message.created_at)],
   ].forEach(([key, value]) => crmFields.append(field(String(key), value)));
@@ -896,14 +726,40 @@ function renderReviewMessageDetail(message: ReviewMessage) {
       "CRM 内文本",
       snapshot.review_context?.crm_internal_note || lead.internal_note,
     ),
+  );
+  if (snapshot.review_context?.crm_email_evidence) {
+    crmPanel.append(
+      block("邮件往来证据", snapshot.review_context.crm_email_evidence.evidence_quote),
+    );
+  }
+  if (snapshot.review_context?.crm_email_history) {
+    crmPanel.append(
+      block(
+        "完整邮件上下文",
+        emailHistoryText(snapshot.review_context.crm_email_history),
+      ),
+    );
+  }
+  crmPanel.append(
     block("Hermes 判断理由", output.reason),
     block("内部提醒", warningText(output.warnings)),
   );
+  const notesReviewOnly =
+    snapshot.notes_review_only === true || snapshot.notes_experiment === true;
+  const approvalBlocked =
+    snapshot.message_route === "referral_review" || notesReviewOnly;
   if (snapshot.message_route === "referral_review") {
     crmPanel.append(
       block(
         "人工动作",
         "推荐关系方向未确认。请先核对 CRM 原文；当前消息禁止批准发送。",
+      ),
+    );
+  } else if (notesReviewOnly) {
+    crmPanel.append(
+      block(
+        "人工动作",
+        "Notes 邮件已由 Poller 正式接入。可修改、重新生成或拒绝；当前仍为人工审阅模式，禁止批准发送。",
       ),
     );
   }
@@ -976,9 +832,11 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   approveButton.className = "approve";
   rejectButton.className = "reject";
   actions.append(saveButton, regenerateButton, approveButton, rejectButton);
-  if (snapshot.message_route === "referral_review") {
+  if (approvalBlocked) {
     approveButton.disabled = true;
-    approveButton.title = "推荐关系未核对，禁止批准发送";
+    approveButton.title = notesReviewOnly
+      ? "Notes 人工审阅消息禁止批准发送"
+      : "推荐关系未核对，禁止批准发送";
   }
 
   const buttons = [
@@ -990,7 +848,7 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   const setBusy = (busy: boolean) => {
     buttons.forEach((button) => {
       button.disabled = busy || (
-        button === approveButton && snapshot.message_route === "referral_review"
+        button === approveButton && approvalBlocked
       );
     });
   };
@@ -1170,6 +1028,152 @@ function renderReviewMessages(records: ReviewMessage[]) {
   workspace.classList.remove("hidden");
 }
 
+function renderConversationActionDetail(action: ConversationAction) {
+  const snapshot = action.crm_snapshot || {};
+  const evidence = snapshot.review_context?.crm_email_evidence || {};
+  const salesDraft = action.analysis?.sales_draft?.content;
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  const heading = document.createElement("div");
+  heading.className = "panel-heading";
+  const title = document.createElement("h2");
+  title.textContent = "会话动作依据";
+  heading.append(
+    title,
+    badge(conversationActionLabels[action.action_type] || action.action_type, action.action_type),
+  );
+  const fields = document.createElement("dl");
+  [
+    ["公司", snapshot.company?.name],
+    ["联系人", snapshot.contact?.name],
+    ["销售", snapshot.sales?.name],
+    ["销售邮箱", snapshot.conversation_sender_identity?.account],
+    ["动作", conversationActionLabels[action.action_type] || action.action_type],
+    ["生成时间", formatDateTime(action.created_at)],
+  ].forEach(([key, value]) => fields.append(field(String(key), value)));
+  panel.append(
+    heading,
+    fields,
+    block("Hermes 判断理由", action.analysis?.reason),
+    block("关键证据", evidence.evidence_quote),
+    block(
+      "Notes 邮件上下文",
+      emailHistoryText(snapshot.review_context?.crm_email_history) || evidence.note_text,
+    ),
+  );
+  if (action.action_type === "internal_task" && salesDraft) {
+    panel.append(
+      block(
+        "销售处理草稿",
+        `${text(salesDraft.subject)}\n\n${text(salesDraft.body)}`,
+      ),
+      block(
+        "中文对照",
+        `${text(salesDraft.subject_zh)}\n\n${text(salesDraft.body_zh)}`,
+      ),
+    );
+  }
+
+  const reviewPanel = document.createElement("div");
+  reviewPanel.className = "panel output-panel";
+  const reviewHeading = document.createElement("div");
+  reviewHeading.className = "panel-heading";
+  const reviewTitle = document.createElement("h2");
+  reviewTitle.textContent = "人工处理";
+  reviewHeading.append(reviewTitle, badge("待处理", "generated"));
+  const form = document.createElement("form");
+  form.className = "review-editor";
+  const reviewerLabel = document.createElement("label");
+  const reviewerInput = document.createElement("input");
+  reviewerLabel.textContent = "处理人";
+  reviewerInput.value = "review-ui";
+  reviewerInput.maxLength = 200;
+  reviewerLabel.append(reviewerInput);
+  const noteLabel = document.createElement("label");
+  const noteInput = document.createElement("textarea");
+  noteLabel.textContent = "处理备注（可选）";
+  noteInput.maxLength = 2000;
+  noteInput.rows = 3;
+  noteLabel.append(noteInput);
+  const actions = document.createElement("div");
+  actions.className = "review-actions";
+  const resolveButton = document.createElement("button");
+  const dismissButton = document.createElement("button");
+  resolveButton.type = dismissButton.type = "button";
+  resolveButton.textContent = "标记已处理";
+  dismissButton.textContent = "忽略";
+  resolveButton.className = "approve";
+  dismissButton.className = "reject";
+  actions.append(resolveButton, dismissButton);
+  const decide = async (decision: "resolved" | "dismissed") => {
+    resolveButton.disabled = dismissButton.disabled = true;
+    setStatus(decision === "resolved" ? "正在标记已处理…" : "正在忽略该动作…", "running");
+    try {
+      await request(
+        `/api/review/actions/${encodeURIComponent(action.id)}/decision`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            decision,
+            reviewer: reviewerInput.value,
+            note: noteInput.value || null,
+          }),
+        },
+      );
+      setStatus(decision === "resolved" ? "会话动作已处理" : "会话动作已忽略", "success");
+      await loadConversationActions();
+    } catch (error) {
+      resolveButton.disabled = dismissButton.disabled = false;
+      showError(error);
+    }
+  };
+  resolveButton.addEventListener("click", () => decide("resolved"));
+  dismissButton.addEventListener("click", () => decide("dismissed"));
+  form.append(reviewerLabel, noteLabel, actions);
+  reviewPanel.append(
+    reviewHeading,
+    block(
+      "安全边界",
+      "此队列只记录内部动作。销售处理草稿仅供复制完善，附件需在邮箱中人工添加；不会创建待发送消息，也没有进入 Outbox 的入口。",
+    ),
+    form,
+  );
+  detail.replaceChildren(panel, reviewPanel);
+}
+
+function renderConversationActions(records: ConversationAction[]) {
+  recordList.replaceChildren();
+  detail.replaceChildren();
+  recordListTitle.textContent = "会话动作";
+  recordCount.textContent = `${records.length} 条`;
+  records.forEach((action, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "record-item";
+    const title = document.createElement("strong");
+    const subtitle = document.createElement("span");
+    title.textContent = text(action.crm_snapshot?.company?.name, "未知公司");
+    subtitle.textContent = `${text(action.crm_snapshot?.contact?.name, "未知联系人")} · ${text(action.crm_snapshot?.sales?.name, "未知销售")}`;
+    button.append(
+      title,
+      subtitle,
+      badge(conversationActionLabels[action.action_type] || action.action_type, action.action_type),
+    );
+    button.addEventListener("click", () => {
+      recordList.querySelectorAll(".active").forEach((node) => node.classList.remove("active"));
+      button.classList.add("active");
+      renderConversationActionDetail(action);
+    });
+    recordList.append(button);
+    if (index === 0) button.click();
+  });
+  if (!records.length) {
+    detail.append(block("会话动作", "当前没有等待人工处理的会话动作"));
+  }
+  workspace.classList.remove("hidden");
+}
+
 function renderOutboxDeliveryDetail(delivery: OutboxDelivery) {
   const payload = delivery.payload || {};
   const deliveryPanel = document.createElement("div");
@@ -1255,6 +1259,7 @@ function renderQueueDetail(record: QueueRecord, leadDetail?: LeadDetail) {
   const company = snapshot.company || {};
   const contact = snapshot.contact || {};
   const sales = snapshot.sales || {};
+  const notesFollowUp = leadDetail?.notes_follow_up;
   const schedulePanel = document.createElement("div");
   schedulePanel.className = "panel";
   const heading = document.createElement("div");
@@ -1274,12 +1279,23 @@ function renderQueueDetail(record: QueueRecord, leadDetail?: LeadDetail) {
     ["沉淀到期", formatDateTime(record.classification_due_at)],
     ["下次动作", formatDateTime(record.next_action_at)],
     ["成功发送次数", record.follow_up_count],
+    [
+      "Notes 读取",
+      notesFollowUp
+        ? `${notesFollowUp.note_count} 条 · ${notesStatusLabels[notesFollowUp.status] || notesFollowUp.status}`
+        : "未读取",
+    ],
     ["Outbox 消息 ID", record.latest_message_version_id],
     ["状态更新时间", formatDateTime(record.updated_at)],
   ].forEach(([key, value]) => fields.append(field(String(key), value)));
   schedulePanel.append(heading, fields);
   if (lead.internal_note) {
     schedulePanel.append(block("CRM 内文本", lead.internal_note));
+  }
+  if (notesFollowUp?.notes?.length) {
+    schedulePanel.append(
+      block("CRM Notes 邮件上下文", emailHistoryText(notesFollowUp.notes)),
+    );
   }
 
   const reasonPanel = document.createElement("div");
@@ -1491,33 +1507,12 @@ function renderQueue(records: QueueRecord[]) {
   workspace.classList.remove("hidden");
 }
 
-async function poll(runId: string) {
-  const run = await request<RunState>(`/api/runs/${runId}`);
-  renderSummary(run);
-  if (run.status === "running") {
-    setStatus(`正在生成：${run.completed} / ${run.total || "…"}`, "running");
-    window.setTimeout(() => poll(runId).catch(showError), 1500);
-    return;
-  }
-  startButton.disabled = false;
-  if (run.status === "failed") {
-    setStatus(run.error || "生成失败", "error");
-  } else {
-    setStatus(`生成完成：${run.valid} 条有效，${run.invalid} 条无效`, "success");
-  }
-  const result = await request<{ records: RecordResult[] }>(`/api/runs/${runId}/results`);
-  renderRecords(result.records);
-  loadDashboard().catch(() => undefined);
-}
-
 function showError(error: unknown) {
-  startButton.disabled = false;
   setStatus(error instanceof Error ? error.message : "发生未知错误", "error");
 }
 
 async function loadQueue(statuses: string[] = []) {
   pollQueueButton.disabled = true;
-  summary.classList.add("hidden");
   workspace.classList.add("hidden");
   setStatus("正在读取二级线索队列…", "running");
   const parameters = new URLSearchParams({ limit: "500" });
@@ -1543,7 +1538,6 @@ async function loadQueue(statuses: string[] = []) {
 
 async function loadReviewMessages() {
   reviewMessagesButton.disabled = true;
-  summary.classList.add("hidden");
   workspace.classList.add("hidden");
   setStatus("正在读取 Outbox 前的待审消息…", "running");
   try {
@@ -1568,6 +1562,26 @@ async function loadReviewMessages() {
     }
   } finally {
     reviewMessagesButton.disabled = false;
+  }
+}
+
+async function loadConversationActions() {
+  conversationActionsButton.disabled = true;
+  workspace.classList.add("hidden");
+  setStatus("正在读取会话动作…", "running");
+  try {
+    const result = await request<{ records: ConversationAction[] }>(
+      "/api/review/actions?status=pending&limit=200",
+    );
+    renderConversationActions(result.records);
+    setStatus(
+      result.records.length
+        ? `已加载 ${result.records.length} 条待处理会话动作`
+        : "当前没有等待人工处理的会话动作",
+      result.records.length ? "success" : "",
+    );
+  } finally {
+    conversationActionsButton.disabled = false;
   }
 }
 
@@ -1641,7 +1655,6 @@ function applyReviewFilters(): void {
 
 async function loadOutboxDeliveries() {
   outboxQueueButton.disabled = true;
-  summary.classList.add("hidden");
   workspace.classList.add("hidden");
   setStatus("正在读取 Outbox 投递队列…", "running");
   try {
@@ -1660,30 +1673,17 @@ async function loadOutboxDeliveries() {
   }
 }
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  startButton.disabled = true;
-  summary.classList.add("hidden");
-  workspace.classList.add("hidden");
-  setStatus("正在从已排期队列准备消息预览…", "running");
+reviewMessagesButton.addEventListener("click", async () => {
   try {
-    const run = await request<RunState>("/api/runs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        limit: Number(limitInput.value),
-        sort: sortInput.value,
-      }),
-    });
-    await poll(run.run_id);
+    await loadReviewMessages();
   } catch (error) {
     showError(error);
   }
 });
 
-reviewMessagesButton.addEventListener("click", async () => {
+conversationActionsButton.addEventListener("click", async () => {
   try {
-    await loadReviewMessages();
+    await loadConversationActions();
   } catch (error) {
     showError(error);
   }
@@ -1781,40 +1781,6 @@ runtimeReportDate.addEventListener("change", () => {
       runtimeReportStatus.textContent =
         error instanceof Error ? `报告读取失败：${error.message}` : "报告读取失败";
     });
-});
-
-reviewModeToggle.addEventListener("click", async () => {
-  if (currentReviewEnabled === null) return;
-  const enabled = !currentReviewEnabled;
-  const action = enabled ? "开启" : "关闭";
-  const consequence = enabled
-    ? "后续低置信度分类和生成消息将等待人工处理。"
-    : "低置信度分类将继续排期，待审阅消息会自动批准进入投递队列。";
-  if (!window.confirm(`确认${action}人工审阅？\n${consequence}`)) return;
-  reviewModeToggle.disabled = true;
-  setStatus(`正在${action}人工审阅…`, "running");
-  try {
-    const result = await request<
-      ReviewConfiguration & {
-        scheduler_notified: boolean;
-        changed_at: string;
-      }
-    >("/api/polling/review-mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
-    });
-    renderReviewMode(result);
-    setStatus(
-      `${action}人工审阅已生效` +
-        (result.scheduler_notified ? "，调度器已立即唤醒" : "，设置已保存"),
-      "success",
-    );
-    loadDashboard().catch(() => undefined);
-  } catch (error) {
-    reviewModeToggle.disabled = false;
-    showError(error);
-  }
 });
 
 loadDashboard().catch(() => undefined);

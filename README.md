@@ -14,8 +14,8 @@ Twenty CRM（只读）→ Hermes 判断与生成 → Review UI 人工审阅
 4. Hermes 按 Skill 生成客户语言正文、中文翻译和内部判断；
 5. 在 Review UI 中逐条检查 CRM 输入与 Hermes 结果。
 
-手动 Review 预览不导入 Outbox，也不会发送消息。自动二级线索调度生成的有效消息
-会进入 `message_version.pending_review` 审核队列；Review UI 支持修改、输入新要求后
+Review UI 不再从已排期线索生成临时消息。自动二级线索调度生成的有效消息会进入
+`message_version.pending_review` 审核队列；Review UI 支持修改、输入新要求后
 让 Hermes 重新生成、批准或拒绝。只有人工批准后才创建可投递的
 `delivery_outbox` 任务。
 
@@ -41,6 +41,7 @@ CRM。
 | `recommender_thanks` | 感谢推荐人；不得询问其产品需求 |
 | `referred_intro` | 联系被推荐人并说明已核实的推荐关系 |
 | `referral_review` | 推荐关系方向未确认，先人工核对；禁止批准发送 |
+| `email_reply` | Notes 邮件：按完整会话生成直接回复或转介绍感谢；内部待办进入独立“会话动作”队列；当前只允许人工审阅 |
 
 有具体产品、数量、报价或资料请求的 CRM 证据不会在本模块内自动升级为询盘；只有 CRM
 后续将记录生命周期更新为 `inquiry`，才由其他流程处理。
@@ -56,7 +57,7 @@ CRM remark 明确记录销售已经回复或发送资料时，系统不会重新
 2. 没有邮箱但有 LinkedIn 时生成 LinkedIn；
 3. 两者都没有时仍生成 Email 格式，并添加 `CONTACT_CHANNEL_MISSING`。
 
-## 本地生成审阅界面
+## 本地审阅界面
 
 测试阶段可运行：
 
@@ -68,17 +69,29 @@ REVIEW_UI_HOST=127.0.0.1 ./bin/start-review-ui
 默认直接使用已构建的前端。修改 `review_web/src` 后可执行
 `REVIEW_UI_REBUILD=true ./bin/start-review-ui`，缺少前端依赖时会自动运行 `npm ci`。
 
-页面从本地已排期队列选择 1～20 条记录，可按最早排期、最近分类或随机抽样，
-然后逐条展示调度器实际消息输入与 Hermes 结果。预览不会改变线索状态或排期，
-渠道由 CRM 联系信息自动确定。页面也可读取正式 `pending_review` 消息，保存人工
-修改、按审核要求重新生成、批准或拒绝；重新生成结果仍停留在审核队列。该入口强制
-设置：
+页面不再从本地已排期队列生成临时预览。消息由正式 Poller 到期生成并进入
+`pending_review` 后，页面可保存人工修改、按审核要求重新生成、批准或拒绝；重新生成
+结果仍停留在审核队列。渠道由 CRM 联系信息自动确定。Review UI 启动时会执行 Outbox
+数据库预检。
 
-```dotenv
-OUTBOX_AUTO_IMPORT=false
-```
-
-因此当前审阅测试不需要启动下游发信消费者；Review UI 启动时仍会执行 Outbox 数据库预检。
+Poller 已正式读取二级联系人的 Notes 邮件。默认每 10 分钟扫描最近 500 位有邮件 Notes 的
+联系人，每轮最多分析 3 条；相同最新 Note 只处理一次，`no_action` 和等待客户回复也会写入
+本地幂等状态，不会重复消耗 Hermes。首次上线会把既有 Notes 登记为基线，仅自动处理此后
+出现的新 Note；历史回放必须显式设置 `HERMES_NOTES_PROCESS_EXISTING=true`。Hermes 先使用
+完整邮件上下文独立判断直接回复、内部待办、
+转介绍、无需发送或人工判断；直接回复、转介绍感谢和内部待办才由第二次独立调用生成文案，
+生成阶段不能修改动作。直接回复和转介绍感谢进入消息审核队列；`internal_task` 和
+`manual_review` 进入独立“会话动作”队列。内部待办同时展示一份销售处理草稿，供销售在
+邮箱中人工添加附件后复制完善，不会进入消息队列或 Outbox。会话动作可查看 Notes 原文与
+判断理由并标记已处理或忽略。本地校验失败时最多纠错重试一次。Notes 消息在前端可
+修改、重新生成或拒绝；当前仍采用审阅模式，前后端禁止批准，不会创建
+`delivery_outbox`。诊断命令和详细边界见 [`notes_trial/README.md`](notes_trial/README.md)。
+标题以“邮件沟通记录”开头的旧 Notes 不参与判断。审核页的销售归属来自联系人
+`createdByName`；回信署名与发件账号优先采用当前邮件往来使用名，并按
+`<使用名>@okgmineral.com` 生成，邮件使用名缺失时才使用 CRM 创建人映射。两类身份分别
+保存，邮件署名不会覆盖 CRM 销售归属。旧格式
+邮件时间读取正文 `**日期**`；可信自动来源的新格式只有在邮件标识、方向和标题时间均匹配
+时才使用 CRM `createdAt` 排序，引用正文中的普通 `Date:` 不作为邮件时间。
 
 需要在前台查看完整本地链路时，分别打开三个终端：
 
@@ -94,30 +107,6 @@ REVIEW_UI_HOST=127.0.0.1 ./bin/start-review-ui
 ```
 
 随后访问 `http://127.0.0.1:8000`。停止前台进程使用 `Ctrl-C`；不会删除本地 SQLite 或运行日志。
-
-### 重新生成旧待审核消息
-
-规则调整后，可先预览受影响消息，再执行人工触发的重生成。命令只更新
-`pending_review` 草稿，不批准、不发送，也不写回 CRM：
-
-```bash
-set -a; source config/local.env; set +a
-scripts/run_refresh_pending_review_messages.sh --max 1000 --dry-run
-scripts/run_refresh_pending_review_messages.sh --max 1000 --workers 4
-```
-
-如果旧消息曾因 Hermes 代理问题使用过兜底草稿，修复代理配置后使用
-`--retry-fallbacks` 强制重新调用 Hermes：
-
-```bash
-NO_PROXY='127.0.0.1,localhost' \
-no_proxy='127.0.0.1,localhost' \
-scripts/run_refresh_pending_review_messages.sh \
-  --max 1000 --workers 4 --retry-fallbacks
-```
-
-Hermes 调用环境会自动移除 httpx 在本机代理解析中容易误判的 `::1` 和 `::1/128`。
-若生成仍失败，脚本会保留失败并记录原因，不会再次静默覆盖成兜底草稿。
 
 ## 二级线索调度
 
@@ -138,7 +127,7 @@ Hermes 调用环境会自动移除 httpx 在本机代理解析中容易误判的
 ./bin/hermes-poller queue --limit 50
 ```
 
-Review UI 可查看二级线索队列并从已排期记录生成消息预览。详细说明见
+Review UI 可查看二级线索队列和正式待审消息。详细说明见
 [`docs/HERMES_POLLING.md`](docs/HERMES_POLLING.md)。
 
 看板的“需人工处理”阶段汇总 `needs_review`、`needs_contact` 和 `failed`，点击后可直接
@@ -155,6 +144,11 @@ PostgreSQL，输出到 `outputs/runtime-reports/`。可在 Review UI 点击“�
 
 同一天再次触发会更新当日归档。Review UI 可查看并下载 JSON/Markdown；报告不会自动
 生成、发送或提交。
+
+### 隔离的三级线索实验
+
+`tertiary_trial/` 仅保存已搁置的手动实验，不被 `app/`、Poller、Review UI 或 Outbox
+导入和调度。需要重新评估三级线索流程时，按该目录 README 单独运行；实验输出不会提交。
 
 ## Outbox 链路
 
@@ -196,10 +190,9 @@ Outbox 使用独立 PostgreSQL 的 `sales_automation` schema。批准和写入
 ./bin/twenty-hermes migrate
 ./bin/twenty-hermes products
 ./bin/twenty-hermes run
-./bin/twenty-hermes queue
-./bin/twenty-hermes show MESSAGE_ID
-./bin/twenty-hermes approve MESSAGE_ID --reviewer "Your Name" --yes
 ```
+
+消息查看、修改和批准统一在 Review UI 中完成，命令行不再提供第二套审批入口。
 
 `products` 以只读事务读取 Twenty CRM `_product` 中未删除的 `name` 和
 `ename`，与消息生成 Skill 的 `Product Portfolio` 对比，并将完整结果写入
@@ -218,7 +211,7 @@ Token。面向消费者开发者的中文说明见
 
 - `outputs/runs/<时间>/`：输入、Hermes 原始输出和校验结果；
 - `reports/latest.html`：最近一次运行报告；
-- PostgreSQL `sales_automation.*`：版本、审批、Outbox 和发送尝试。
+- PostgreSQL `sales_automation.*`：消息版本、审批、独立会话动作、Outbox 和发送尝试。
 
 ## 状态与故障边界
 

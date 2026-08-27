@@ -64,6 +64,13 @@ The decision rules in this section take precedence over all later content restri
 The input field `message_route` is authoritative. Do not replace it with a
 generic `UNKNOWN_DEMAND` response:
 
+- `email_reply`: reply directly to the latest verified customer email using
+  only `review_context.crm_email_evidence` and the supplied recent-email
+  context. Never restart the introduction, call the exchange an inquiry unless
+  the evidence does, claim an attachment is present, or promise unverified
+  availability. The Notes analyzer does not publish internal tasks as placeholder
+  messages. This experimental route preserves
+  `NOTES_REVIEW_ONLY_REQUIRES_MANUAL_REVIEW` and requires human review.
 - `recommender_thanks`: thank the current contact and, only when supported,
   request an introduction, forwarding, or reminder. Never ask the recommender
   about products, specifications, quantities, applications, or purchasing needs.

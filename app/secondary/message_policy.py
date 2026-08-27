@@ -1,16 +1,17 @@
 import copy
-import re
 from typing import Any, Dict, List, Optional
 
 from .sender_identity import resolve_sender_identity
 
 
 MANUAL_CONFIRMATION_WARNING = "CRM_EVIDENCE_REQUIRES_MANUAL_CONFIRMATION"
+NOTES_REVIEW_WARNING = "NOTES_REVIEW_ONLY_REQUIRES_MANUAL_REVIEW"
 COMPANY_CONTEXT_WARNINGS = {
     "COMPANY_CONTEXT_MISSING",
     "COMPANY_CONTEXT_THIN",
 }
 MESSAGE_ROUTES = {
+    "email_reply",
     "recommender_thanks",
     "referred_intro",
     "qualification",
@@ -45,6 +46,18 @@ def message_route(
         if isinstance(classification, dict)
         else source_record.get("sales_follow_up_context")
     )
+    notes_evidence = (source_record.get("review_context") or {}).get(
+        "crm_email_evidence"
+    )
+    if (
+        source_record.get("notes_review_only") is True
+        or source_record.get("notes_experiment") is True
+    ) and isinstance(
+        notes_evidence, dict
+    ):
+        return "email_reply"
+    if lead_type == "below_moq" or "SMALL_QUANTITY" in raw_types:
+        return "default"
     if (
         isinstance(follow_up, dict)
         and follow_up.get("status") in {"sales_replied", "information_sent"}
@@ -57,13 +70,9 @@ def message_route(
         if role == "referred":
             return "referred_intro"
         return "referral_review"
-    if lead_type in {"no_current_demand", "below_moq"}:
+    if lead_type == "no_current_demand":
         return "default"
     return "qualification"
-
-
-def _contains_simplified_chinese(value: str) -> bool:
-    return any("\u4e00" <= character <= "\u9fff" for character in value)
 
 
 def _mapped_sender_name(record: Dict[str, Any]) -> Optional[str]:
@@ -280,8 +289,6 @@ def validation_errors(
     reason = candidate.get("reason")
     if not isinstance(reason, str) or not reason:
         errors.append("缺少判断理由")
-    elif not _contains_simplified_chinese(reason):
-        errors.append("判断理由必须使用简体中文")
     if candidate.get("review_required") is not True:
         errors.append("review_required未明确设为true")
     route = message_route(crm_input, None)
@@ -327,17 +334,6 @@ def validation_errors(
             errors.append("LinkedIn消息不应包含主题")
         if route == "referral_review":
             errors.append("推荐关系未确认时不得生成客户消息")
-        if route == "recommender_thanks":
-            body_text = " ".join(
-                str(content.get(field) or "")
-                for field in ("body", "body_zh")
-            ).casefold()
-            if re.search(
-                r"(what|which|could you share|please share|current|specific)"
-                r"[^.?!]{0,80}(product|material|specification|quantity|requirement|sourcing|purchasing|application|需求|产品|规格|数量)",
-                body_text,
-            ):
-                errors.append("推荐人消息不得询问产品需求")
         if route == "conversation_follow_up":
             context = crm_input.get("sales_follow_up_context") or {}
             if context.get("status") not in {"sales_replied", "information_sent"}:
@@ -347,20 +343,18 @@ def validation_errors(
                 and len(information_requested) > 1
             ):
                 errors.append("简短跟进一次最多询问一个事项")
-            body_text = " ".join(
-                str(content.get(field) or "")
-                for field in ("subject", "body", "subject_zh", "body_zh")
-            ).casefold()
-            if any(
-                phrase in body_text
-                for phrase in (
-                    "your inquiry",
-                    "thank you for your interest",
-                    "您的询盘",
-                    "感谢您的关注",
-                )
+        if route == "email_reply":
+            context = (crm_input.get("review_context") or {}).get(
+                "crm_email_evidence"
+            ) or {}
+            quote = context.get("evidence_quote")
+            if not isinstance(quote, str) or not quote.strip():
+                errors.append("邮件回复缺少客户来信原文证据")
+            if (
+                not isinstance(candidate_warnings, list)
+                or NOTES_REVIEW_WARNING not in candidate_warnings
             ):
-                errors.append("简短跟进不得虚构客户询盘或兴趣")
+                errors.append("Notes审阅消息必须保留人工审阅标记")
     elif any(
         content.get(key) is not None
         for key in ("subject", "subject_zh", "body", "body_zh")
@@ -383,7 +377,7 @@ def validation_errors(
         elif expected and not actual:
             errors.append(f"Hermes遗漏了CRM提供的“{label}”标记")
     sender_identity = crm_input.get("conversation_sender_identity") or {}
-    sender_name = _mapped_sender_name(crm_input) or sender_identity.get("name")
+    sender_name = sender_identity.get("name") or _mapped_sender_name(crm_input)
     if decision == "generated" and output_type == "email" and isinstance(sender_name, str):
         for field, label in (("body", "客户正文"), ("body_zh", "中文正文对照")):
             body = content.get(field)

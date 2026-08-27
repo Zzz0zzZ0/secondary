@@ -176,7 +176,12 @@ def compare_catalogs(
 
 def fetch_crm_products(environment: Optional[dict[str, str]] = None) -> list[dict[str, Any]]:
     environment = environment or dict(os.environ)
-    required = ["TWENTY_DB_HOST", "TWENTY_DB_NAME", "TWENTY_DB_USER"]
+    required = [
+        "TWENTY_DB_HOST",
+        "TWENTY_DB_NAME",
+        "TWENTY_DB_USER",
+        "TWENTY_WORKSPACE_SCHEMA",
+    ]
     missing = [name for name in required if not environment.get(name)]
     if missing:
         raise RuntimeError(
@@ -185,10 +190,7 @@ def fetch_crm_products(environment: Optional[dict[str, str]] = None) -> list[dic
     password = environment.get("TWENTY_DB_PASSWORD")
     if password is None:
         raise RuntimeError("TWENTY_DB_PASSWORD is required")
-    schema = environment.get(
-        "TWENTY_WORKSPACE_SCHEMA",
-        "workspace_avv74ijhm70d2bh7o1toe4anv",
-    )
+    schema = environment["TWENTY_WORKSPACE_SCHEMA"]
     if not SCHEMA_PATTERN.fullmatch(schema):
         raise RuntimeError(f"TWENTY_WORKSPACE_SCHEMA has an invalid format: {schema}")
 

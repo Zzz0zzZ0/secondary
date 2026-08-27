@@ -13,9 +13,7 @@ from app.delivery_service import (
     complete_delivery,
     fail_delivery,
     queue_status,
-    heartbeat_delivery,
 )
-from app.outbox import approve_message
 from .auth import consumer_scopes, require_consumer_scope, require_producer_token
 
 
@@ -36,24 +34,12 @@ class ClaimRequest(BaseModel):
     wait_seconds: int = Field(default=20, ge=0, le=20)
 
 
-class LeaseRequest(BaseModel):
-    worker_id: str = Field(min_length=1, max_length=128)
-    lease_token: Optional[str] = Field(default=None, max_length=256)
-
-
 class CompleteRequest(BaseModel):
     worker_id: str = Field(min_length=1, max_length=128)
 
 
 class FailRequest(BaseModel):
     worker_id: str = Field(min_length=1, max_length=128)
-
-
-class ApproveRequest(BaseModel):
-    reviewer: str = Field(min_length=1, max_length=200)
-    subject: Optional[str] = Field(default=None, max_length=998)
-    body: Optional[str] = None
-    note: Optional[str] = Field(default=None, max_length=2000)
 
 
 def _credentials(
@@ -101,24 +87,6 @@ async def claim(
         await asyncio.sleep(1)
 
 
-@app.post("/v1/deliveries/{delivery_id}/heartbeat")
-async def heartbeat(
-    delivery_id: UUID,
-    request: LeaseRequest,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_credentials),
-):
-    consumer_scopes(credentials)
-    active = await run_in_threadpool(
-        heartbeat_delivery,
-        delivery_id,
-        request.worker_id,
-        request.lease_token,
-    )
-    if not active:
-        raise HTTPException(status_code=409, detail="Delivery is no longer sending")
-    return {"delivery_id": str(delivery_id), "lease_expires_at": None}
-
-
 @app.post("/v1/deliveries/{delivery_id}/complete")
 async def complete(
     delivery_id: UUID,
@@ -162,24 +130,3 @@ async def status(
         "generated_at": datetime.now(timezone.utc),
         "queues": await run_in_threadpool(queue_status),
     }
-
-
-@app.post("/v1/messages/{message_id}/approve-and-enqueue", status_code=201)
-async def approve_and_enqueue(
-    message_id: UUID,
-    request: ApproveRequest,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_credentials),
-):
-    require_producer_token(credentials)
-    try:
-        outbox_id = await run_in_threadpool(
-            approve_message,
-            message_id,
-            request.reviewer,
-            request.subject,
-            request.body,
-            request.note,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"message_id": str(message_id), "delivery_id": str(outbox_id), "status": "queued"}

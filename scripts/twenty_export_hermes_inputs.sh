@@ -4,7 +4,7 @@ set -euo pipefail
 PSQL_BIN="/opt/homebrew/opt/libpq/bin/psql"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTPUT_PATH="${1:-$SCRIPT_DIR/../outputs/twenty_hermes_inputs.json}"
-WORKSPACE_SCHEMA="${TWENTY_WORKSPACE_SCHEMA:-workspace_avv74ijhm70d2bh7o1toe4anv}"
+WORKSPACE_SCHEMA="${TWENTY_WORKSPACE_SCHEMA:-}"
 EXPORT_LIMIT="${TWENTY_EXPORT_LIMIT:-500}"
 AFTER_ID="${TWENTY_AFTER_ID:-}"
 RECORD_ID="${TWENTY_RECORD_ID:-}"
@@ -22,6 +22,7 @@ require_env TWENTY_DB_HOST
 require_env TWENTY_DB_PORT
 require_env TWENTY_DB_NAME
 require_env TWENTY_DB_USER
+require_env TWENTY_WORKSPACE_SCHEMA
 
 if [[ ! "$WORKSPACE_SCHEMA" =~ ^workspace_[a-z0-9]+$ ]]; then
   printf 'TWENTY_WORKSPACE_SCHEMA has an invalid format: %s\n' "$WORKSPACE_SCHEMA" >&2
