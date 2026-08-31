@@ -107,7 +107,7 @@ Input situation: The customer requested a catalog or company information but has
 
 - Ask one short qualification question or follow up on information already sent.
 - Follow up after 3–7 days when the timing data proves it is due.
-- After two unanswered short-cycle attempts, return `no_message` and move the record to low-frequency follow-up through CRM policy.
+- After unanswered short-cycle attempts, use a low-pressure maintenance message only when `next_eligible_follow_up_at` proves the scheduler's slower 30–45, 60–90, or 90–120 day interval is due. Do not repeat the introduction or the same qualification question.
 - If timing or attempt count is missing, add `FOLLOW_UP_TIMING_UNVERIFIED` and require human timing review.
 
 ## Referred Contact

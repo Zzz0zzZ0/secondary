@@ -189,6 +189,42 @@ class NotesFollowUpSchedulerTest(unittest.TestCase):
         self.assertEqual(1, self.analyze.call_count)
         self.assertEqual("no-action-lead", self.analyze.call_args.args[0]["lead_id"])
 
+    def test_new_waiting_customer_note_supersedes_older_completed_state(self):
+        self.records = {"waiting-lead": self.records["waiting-lead"]}
+        self.connection.execute(
+            """
+            INSERT INTO notes_follow_up_state
+              (latest_note_id, lead_id, source_hash, source_created_at,
+               crm_snapshot_json, structural_state, status, decision,
+               created_at, updated_at)
+            VALUES (?, ?, ?, ?, '{}', 'needs_analysis', 'completed',
+                    'no_action', ?, ?)
+            """,
+            (
+                "older-note",
+                "waiting-lead",
+                "older-source",
+                "2026-08-19T10:00:00+00:00",
+                "2026-08-19T10:00:00+00:00",
+                "2026-08-19T10:00:00+00:00",
+            ),
+        )
+
+        self._processor().run(limit=1)
+
+        rows = self.connection.execute(
+            """
+            SELECT latest_note_id, status
+            FROM notes_follow_up_state
+            WHERE lead_id = 'waiting-lead'
+            ORDER BY source_created_at
+            """
+        ).fetchall()
+        self.assertEqual(
+            [("older-note", "superseded"), ("note-waiting", "skipped")],
+            [tuple(row) for row in rows],
+        )
+
     def test_full_scan_supersedes_pending_note_absent_from_current_crm_scope(self):
         processor = self._processor()
         record = self.records["reply-lead"]
@@ -335,7 +371,7 @@ class NotesFollowUpSchedulerTest(unittest.TestCase):
                 else:
                     self.assertIsNone(result)
                 params = connection.cursor_object.execute.call_args_list[0].args[1]
-                self.assertEqual(("notes-semantic-v3", "notes-draft-v2"), params[-2:])
+                self.assertEqual(("notes-semantic-v3", "notes-draft-v3"), params[-2:])
 
     def test_policy_upgrade_retires_same_note_review_before_reprocessing(self):
         from unittest.mock import patch

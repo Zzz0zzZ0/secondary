@@ -2,11 +2,12 @@ import json
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.secondary_scheduler import SALES_FOLLOW_UP_TIME_UNVERIFIED
 from app.secondary_scheduler import SecondaryLeadScheduler
+from app.secondary_scheduler import _crm_next_follow_up_at
 from app.secondary_scheduler import _sales_follow_up_due_at
 
 
@@ -400,6 +401,57 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
 
             self.assertIsNone(scheduler._claim_due_action())
 
+    def test_waiting_customer_note_allows_scheduled_maintenance(self):
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            with scheduler._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO secondary_lead_state
+                      (lead_id, source_hash, source_updated_at, source_record_id,
+                       crm_snapshot_json, lead_type, status, next_action_at,
+                       last_seen_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'unknown_demand', 'scheduled', ?, ?, ?, ?)
+                    """,
+                    (
+                        "lead-1",
+                        "source-1",
+                        now.isoformat(),
+                        "lead-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO notes_follow_up_state
+                      (latest_note_id, lead_id, source_hash, source_created_at,
+                       crm_snapshot_json, structural_state, status,
+                       created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'waiting_customer', 'skipped', ?, ?)
+                    """,
+                    (
+                        "note-1",
+                        "lead-1",
+                        "notes-source-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+            claimed = scheduler._claim_due_action()
+
+            self.assertIsNotNone(claimed)
+            self.assertEqual("lead-1", claimed["lead_id"])
+
     def test_notes_owned_lead_remains_in_its_business_queue(self):
         now = datetime(2026, 8, 21, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
@@ -468,6 +520,36 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
         )
         record["source_version"]["activity_at_source"] = "createdAt"
         self.assertIsNone(_sales_follow_up_due_at(record, 5))
+
+    def test_crm_next_follow_up_is_an_explicit_optional_override(self):
+        record = {
+            "lead": {"next_follow_up_at": "2026-09-01T08:00:00+00:00"},
+        }
+        self.assertEqual(
+            "2026-09-01T08:00:00+00:00",
+            _crm_next_follow_up_at(record),
+        )
+        self.assertIsNone(_crm_next_follow_up_at({"lead": {}}))
+
+    def test_follow_up_frequency_slows_to_long_term_maintenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+            )
+            expected_ranges = {
+                0: (3, 7),
+                1: (30, 45),
+                2: (60, 90),
+                3: (90, 120),
+                8: (90, 120),
+            }
+            for sequence, (low, high) in expected_ranges.items():
+                days = scheduler._interval_days(
+                    "unknown_demand", "lead-1", sequence
+                )
+                self.assertGreaterEqual(days, low)
+                self.assertLessEqual(days, high)
 
     def test_sales_reply_without_reliable_time_requires_review(self):
         now = datetime(2026, 8, 8, tzinfo=timezone.utc)
@@ -543,6 +625,90 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
             self.assertEqual(
                 SALES_FOLLOW_UP_TIME_UNVERIFIED,
                 stored["last_error"],
+            )
+
+    def test_waiting_customer_uses_last_sales_time_for_maintenance(self):
+        now = datetime(2026, 8, 8, tzinfo=timezone.utc)
+        record = {
+            "lead": {"id": "lead-1"},
+            "source_version": {
+                "activity_at": "2026-08-01T00:00:00+00:00",
+                "activity_at_source": "lastFollowUp",
+            },
+        }
+        candidate = {
+            "lead_id": "lead-1",
+            "lead_type": "unknown_demand",
+            "confidence": 0.9,
+            "reason": "需求仍未知。",
+            "evidence": [],
+            "sales_follow_up_context": {
+                "status": "none",
+                "evidence_quote": None,
+            },
+            "contact_permission": {
+                "status": "allowed",
+                "evidence_quote": None,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            scheduler.classification_runner.run = (
+                lambda _record, _run_dir: (candidate, None)
+            )
+            with scheduler._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO secondary_lead_state
+                      (lead_id, source_hash, source_updated_at, source_record_id,
+                       crm_snapshot_json, status, follow_up_count,
+                       last_seen_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'classifying', 0, ?, ?, ?)
+                    """,
+                    (
+                        "lead-1", "source-1", now.isoformat(), "lead-1",
+                        json.dumps(record), now.isoformat(), now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO notes_follow_up_state
+                      (latest_note_id, lead_id, source_hash, source_created_at,
+                       crm_snapshot_json, structural_state, status,
+                       created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', 'waiting_customer', 'skipped', ?, ?)
+                    """,
+                    (
+                        "note-1", "lead-1", "notes-source-1",
+                        now.isoformat(), now.isoformat(), now.isoformat(),
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM secondary_lead_state WHERE lead_id = 'lead-1'"
+                ).fetchone()
+
+            result = scheduler._classify_one(row)
+            days = scheduler._interval_days("unknown_demand", "lead-1", 0)
+
+            self.assertEqual("scheduled", result["status"])
+            self.assertEqual(
+                (datetime(2026, 8, 1, tzinfo=timezone.utc) + timedelta(days=days)).isoformat(),
+                result["next_action_at"],
+            )
+            with scheduler._connect() as connection:
+                scheduled = connection.execute(
+                    "SELECT * FROM secondary_lead_state WHERE lead_id = 'lead-1'"
+                ).fetchone()
+            message_input = scheduler._message_input(scheduled)
+            self.assertEqual("conversation_follow_up", message_input["message_route"])
+            self.assertEqual(
+                "crm.note.direction",
+                message_input["sales_follow_up_context"]["source"],
             )
 
     def test_retry_attention_requeues_contact_and_failed_leads(self):
@@ -655,7 +821,7 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
             self.assertIsNone(row["latest_message_version_id"])
             self.assertIsNone(row["last_generated_at"])
 
-    def test_sales_reply_allows_only_one_automated_follow_up(self):
+    def test_sales_reply_enters_maintenance_after_automated_follow_up(self):
         now = datetime(2026, 8, 8, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             scheduler = SecondaryLeadScheduler(
@@ -714,8 +880,12 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
                     WHERE lead_id = 'lead-1'
                     """
                 ).fetchone()
-            self.assertEqual("paused", row["status"])
-            self.assertIsNone(row["next_action_at"])
+            days = scheduler._interval_days("unknown_demand", "lead-1", 1)
+            self.assertEqual("scheduled", row["status"])
+            self.assertEqual(
+                (now + timedelta(days=days)).isoformat(),
+                row["next_action_at"],
+            )
             self.assertEqual(1, row["follow_up_count"])
 
 

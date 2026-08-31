@@ -27,7 +27,6 @@ from .secondary.domain import (
     LEAD_TYPE_LABELS,
     MESSAGE_SUBTYPES,
     QUEUE_STATUSES,
-    SHORT_CYCLE_TYPES,
     interval_days,
 )
 from .secondary.message_policy import prepare_message_record
@@ -79,6 +78,12 @@ def _sales_follow_up_due_at(
     if not activity_at:
         return None
     return isoformat(parse_timestamp(str(activity_at)) + timedelta(days=days))
+
+
+def _crm_next_follow_up_at(record: Dict[str, Any]) -> Optional[str]:
+    lead = record.get("lead") or {}
+    value = lead.get("next_follow_up_at") or lead.get("nextFollowUp")
+    return isoformat(parse_timestamp(str(value))) if value else None
 
 
 def _canonical_json(value: Any) -> str:
@@ -901,7 +906,7 @@ class SecondaryLeadScheduler:
                     SELECT 1
                     FROM notes_follow_up_state notes
                     WHERE notes.lead_id = secondary_lead_state.lead_id
-                      AND notes.status != 'superseded'
+                      AND notes.status NOT IN ('superseded', 'skipped')
                   )
                 ORDER BY
                   CASE
@@ -938,6 +943,17 @@ class SecondaryLeadScheduler:
     ) -> int:
         return interval_days(lead_type, lead_id, sequence)
 
+    def _notes_waiting_customer(self, lead_id: str) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                """
+                SELECT 1 FROM notes_follow_up_state
+                WHERE lead_id = ? AND status = 'skipped'
+                LIMIT 1
+                """,
+                (lead_id,),
+            ).fetchone() is not None
+
     def _classify_one(self, row: sqlite3.Row) -> Dict[str, Any]:
         lead_id = row["lead_id"]
         record = json.loads(row["crm_snapshot_json"])
@@ -956,21 +972,22 @@ class SecondaryLeadScheduler:
         contact_permission = candidate["contact_permission"]["status"]
         warnings = record.get("warnings") or []
         follow_up_status = _sales_follow_up_status(candidate)
-        follow_up_days = self._interval_days(candidate["lead_type"], lead_id, 0)
+        waiting_customer = self._notes_waiting_customer(lead_id)
+        follow_up_days = self._interval_days(
+            candidate["lead_type"], lead_id, int(row["follow_up_count"])
+        )
+        explicit_follow_up_at = _crm_next_follow_up_at(record)
+        follow_up_timing_required = follow_up_status != "none" or waiting_customer
         follow_up_at = (
-            _sales_follow_up_due_at(record, follow_up_days)
-            if follow_up_status != "none"
-            else None
+            explicit_follow_up_at or _sales_follow_up_due_at(record, follow_up_days)
+            if follow_up_timing_required
+            else explicit_follow_up_at
         )
         if contact_permission == "do_not_contact" or "DO_NOT_CONTACT" in warnings:
             status = "paused"
             next_action_at = None
             pause_reason = "CRM contains DO_NOT_CONTACT"
-        elif follow_up_status != "none" and int(row["follow_up_count"]) >= 1:
-            status = "paused"
-            next_action_at = None
-            pause_reason = "Sales already replied and one automated follow-up was sent"
-        elif follow_up_status != "none" and follow_up_at is None:
+        elif follow_up_timing_required and follow_up_at is None:
             status = "needs_review"
             next_action_at = None
             pause_reason = SALES_FOLLOW_UP_TIME_UNVERIFIED
@@ -1230,7 +1247,8 @@ class SecondaryLeadScheduler:
                     "This lead is not waiting for classification confirmation"
                 )
             previous_type = row["lead_type"]
-            next_action_at = isoformat(
+            record = self._json_value(row["crm_snapshot_json"], {})
+            next_action_at = _crm_next_follow_up_at(record) or isoformat(
                 self.now()
                 + timedelta(
                     days=self._interval_days(
@@ -1380,7 +1398,7 @@ class SecondaryLeadScheduler:
                     SELECT 1
                     FROM notes_follow_up_state notes
                     WHERE notes.lead_id = secondary_lead_state.lead_id
-                      AND notes.status != 'superseded'
+                      AND notes.status NOT IN ('superseded', 'skipped')
                   )
                 ORDER BY next_action_at, lead_id
                 LIMIT 1
@@ -1424,6 +1442,13 @@ class SecondaryLeadScheduler:
         source_record = json.loads(row["crm_snapshot_json"])
         classification = self._classification_context(row)
         record = prepare_message_record(source_record, classification)
+        if self._notes_waiting_customer(row["lead_id"]):
+            record["message_route"] = "conversation_follow_up"
+            record["sales_follow_up_context"] = {
+                "status": "sales_replied",
+                "evidence_quote": None,
+                "source": "crm.note.direction",
+            }
         lead = record.setdefault("lead", {})
         lead_type = row["lead_type"]
         if lead_type == "no_current_demand":
@@ -1755,27 +1780,13 @@ class SecondaryLeadScheduler:
                 follow_up_count = int(row["follow_up_count"])
             else:
                 follow_up_count = int(row["follow_up_count"]) + 1
-                classification = self._classification_context(row)
-                has_prior_sales_follow_up = (
-                    _sales_follow_up_status(classification) != "none"
+                status = "scheduled"
+                days = self._interval_days(
+                    row["lead_type"],
+                    row["lead_id"],
+                    follow_up_count,
                 )
-                if (
-                    (has_prior_sales_follow_up and follow_up_count >= 1)
-                    or (
-                        row["lead_type"] in SHORT_CYCLE_TYPES
-                        and follow_up_count >= 2
-                    )
-                ):
-                    status = "paused"
-                    next_action_at = None
-                else:
-                    status = "scheduled"
-                    days = self._interval_days(
-                        row["lead_type"],
-                        row["lead_id"],
-                        follow_up_count,
-                    )
-                    next_action_at = isoformat(occurred + timedelta(days=days))
+                next_action_at = isoformat(occurred + timedelta(days=days))
             connection.execute(
                 """
                 UPDATE secondary_lead_state
@@ -2174,7 +2185,7 @@ class SecondaryLeadScheduler:
                     SELECT 1
                     FROM notes_follow_up_state notes
                     WHERE notes.lead_id = secondary_lead_state.lead_id
-                      AND notes.status != 'superseded'
+                      AND notes.status NOT IN ('superseded', 'skipped')
                   )
                 """
             ).fetchone()
@@ -2202,7 +2213,7 @@ class SecondaryLeadScheduler:
                     SELECT 1
                     FROM notes_follow_up_state notes
                     WHERE notes.lead_id = secondary_lead_state.lead_id
-                      AND notes.status != 'superseded'
+                      AND notes.status NOT IN ('superseded', 'skipped')
                   )
                 """
             ).fetchone()
@@ -2498,7 +2509,7 @@ class SecondaryLeadScheduler:
                     AND NOT EXISTS (
                       SELECT 1 FROM notes_follow_up_state notes
                       WHERE notes.lead_id = secondary_lead_state.lead_id
-                        AND notes.status != 'superseded'
+                        AND notes.status NOT IN ('superseded', 'skipped')
                     ) THEN 1 ELSE 0 END)
                     AS classifications_due,
                   SUM(CASE WHEN status = 'scheduled'
@@ -2506,7 +2517,7 @@ class SecondaryLeadScheduler:
                     AND NOT EXISTS (
                       SELECT 1 FROM notes_follow_up_state notes
                       WHERE notes.lead_id = secondary_lead_state.lead_id
-                        AND notes.status != 'superseded'
+                        AND notes.status NOT IN ('superseded', 'skipped')
                     ) THEN 1 ELSE 0 END)
                     AS actions_due
                 FROM secondary_lead_state
@@ -2528,7 +2539,7 @@ class SecondaryLeadScheduler:
                         AND NOT EXISTS (
                           SELECT 1 FROM notes_follow_up_state notes
                           WHERE notes.lead_id = secondary_lead_state.lead_id
-                            AND notes.status != 'superseded'
+                            AND notes.status NOT IN ('superseded', 'skipped')
                         )
                       UNION ALL
                       SELECT next_action_at AS due_at, 'action' AS kind
@@ -2539,7 +2550,7 @@ class SecondaryLeadScheduler:
                         AND NOT EXISTS (
                           SELECT 1 FROM notes_follow_up_state notes
                           WHERE notes.lead_id = secondary_lead_state.lead_id
-                            AND notes.status != 'superseded'
+                            AND notes.status NOT IN ('superseded', 'skipped')
                         )
                     )
                     GROUP BY substr(due_at, 1, 10), kind

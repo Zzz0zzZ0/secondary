@@ -133,7 +133,12 @@ class NotesReviewIntegrationTest(unittest.TestCase):
         )
         analysis = {
             "semantic": {**self.semantic, "decision": "internal_task"},
-            "draft": self.draft,
+            "draft": None,
+            "sales_action": {
+                "lead_id": "person-1",
+                "latest_note_id": "note-1",
+                "action": "准备客户要求的当前规格资料，核对版本后再回复客户。",
+            },
         }
         with patch.object(notes_trial, "create_review_message", message_created), patch.object(
             notes_trial, "create_review_action", action_created
@@ -150,7 +155,8 @@ class NotesReviewIntegrationTest(unittest.TestCase):
         self.assertEqual("internal_task", action_type)
         self.assertEqual("倩文 于", snapshot["sales"]["name"])
         self.assertEqual(self.semantic["reason"], stored_analysis["reason"])
-        self.assertEqual(self.draft, stored_analysis["sales_draft"])
+        self.assertEqual(analysis["sales_action"], stored_analysis["sales_action"])
+        self.assertNotIn("sales_draft", stored_analysis)
 
     def test_publish_manual_review_uses_exact_latest_evidence_fallback(self):
         action_created = Mock(
@@ -620,14 +626,14 @@ class NotesReviewIntegrationTest(unittest.TestCase):
         self.assertNotIn("content", result["semantic"])
         self.assertNotIn("decision", result["draft"])
 
-    def test_analyze_internal_task_generates_sales_handling_draft(self):
+    def test_analyze_injects_one_business_knowledge_snapshot_into_both_stages(self):
         semantic = {
             "lead_id": "person-1",
             "latest_note_id": "note-1",
             "contact_permission": "allowed",
-            "decision": "internal_task",
+            "decision": "reply",
             "confidence": 0.9,
-            "reason": "客户要求销售准备规格资料。",
+            "reason": "客户要求回复。",
             "evidence_index": 0,
             "resume_at": None,
         }
@@ -641,6 +647,63 @@ class NotesReviewIntegrationTest(unittest.TestCase):
             Mock(returncode=0, stdout=json.dumps(semantic), stderr=""),
             Mock(returncode=0, stdout=json.dumps(draft), stderr=""),
         ]
+        with patch.dict(
+            notes_trial.os.environ,
+            {"HERMES_NOTES_BUSINESS_KNOWLEDGE_ENABLED": "true"},
+        ), patch.object(notes_trial.os, "access", return_value=True), patch.object(
+            notes_trial.subprocess, "run", side_effect=hermes_results
+        ) as run:
+            notes_trial.analyze(self.record, self.state)
+
+        prompts = [call.args[0][-1] for call in run.call_args_list]
+        for prompt in prompts:
+            self.assertIn("APPROVED BUSINESS KNOWLEDGE SNAPSHOT", prompt)
+            self.assertIn("business-knowledge-v1", prompt)
+            self.assertIn("company.positioning", prompt)
+            self.assertIn("product.non_catalog", prompt)
+        semantic_hash = prompts[0].split("SHA-256: ", 1)[1].splitlines()[0]
+        draft_hash = prompts[1].split("SHA-256: ", 1)[1].splitlines()[0]
+        self.assertEqual(semantic_hash, draft_hash)
+
+    def test_business_knowledge_direct_answer_overrides_missing_notes_fact(self):
+        snapshot = notes_trial.load_snapshot(("notes_semantic", "notes_draft"))
+        prompt = notes_trial._semantic_prompt(
+            self.record, self.state["latest"], "Buddy", snapshot
+        )
+
+        self.assertIn(
+            "or a direct_answer entry in the approved business knowledge snapshot",
+            prompt,
+        )
+        self.assertIn("Apply its routing mode before choosing an action", prompt)
+
+    def test_business_knowledge_is_disabled_by_default(self):
+        with patch.dict(notes_trial.os.environ):
+            notes_trial.os.environ.pop(
+                "HERMES_NOTES_BUSINESS_KNOWLEDGE_ENABLED", None
+            )
+            self.assertIsNone(notes_trial._business_knowledge_snapshot())
+
+    def test_analyze_internal_task_generates_direct_sales_action(self):
+        semantic = {
+            "lead_id": "person-1",
+            "latest_note_id": "note-1",
+            "contact_permission": "allowed",
+            "decision": "internal_task",
+            "confidence": 0.9,
+            "reason": "客户要求销售准备规格资料。",
+            "evidence_index": 0,
+            "resume_at": None,
+        }
+        sales_action = {
+            "lead_id": "person-1",
+            "latest_note_id": "note-1",
+            "action": "准备客户要求的当前规格资料，核对版本后再回复客户。",
+        }
+        hermes_results = [
+            Mock(returncode=0, stdout=json.dumps(semantic), stderr=""),
+            Mock(returncode=0, stdout=json.dumps(sales_action), stderr=""),
+        ]
 
         with patch.object(notes_trial.os, "access", return_value=True), patch.object(
             notes_trial.subprocess, "run", side_effect=hermes_results
@@ -649,11 +712,12 @@ class NotesReviewIntegrationTest(unittest.TestCase):
 
         self.assertEqual(2, run.call_count)
         self.assertEqual("internal_task", result["semantic"]["decision"])
-        self.assertEqual(draft["content"], result["draft"]["content"])
+        self.assertIsNone(result["draft"])
+        self.assertEqual(sales_action, result["sales_action"])
         generation_prompt = run.call_args_list[1].args[0][-1]
-        self.assertIn("sales-handling draft", generation_prompt)
-        self.assertIn("not a holding", generation_prompt)
-        self.assertIn("reply and not a sendable queue message", generation_prompt)
+        self.assertIn("direct internal instruction for the salesperson", generation_prompt)
+        self.assertIn("Do not write an email", generation_prompt)
+        self.assertIn("short imperative steps", generation_prompt)
         self.assertNotIn("customer-facing email draft", generation_prompt)
 
     def test_referral_generation_has_no_next_step(self):

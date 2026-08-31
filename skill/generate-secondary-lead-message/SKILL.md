@@ -159,7 +159,7 @@ Apply the CRM lead subtype:
 - Use when CRM supplies `UNKNOWN_DEMAND`/未知需求: the customer has shown vague interest, requested a catalog or company information, or has not identified a product, specification, or quantity.
 - Ask a short qualification question about product, application, specification, or quantity. Ask only what is not already supplied.
 - When information was already sent, follow up on relevance or the missing requirement instead of resending or repeating the introduction.
-- Allow a short follow-up window of 3–7 days and no more than two unanswered short-cycle attempts. If two attempts are already recorded without a meaningful reply, return `no_message` and recommend low-frequency follow-up in `reason`.
+- Allow a short follow-up window of 3–7 days for the first attempt. After unanswered short-cycle attempts, follow the supplied `next_eligible_follow_up_at`: use a low-pressure maintenance message at the scheduler's progressively slower 30–45, 60–90, then 90–120 day cadence. Do not repeat the introduction or previous question merely to produce text; return `no_message` when there is no useful, non-repetitive check-in.
 - If attempt count or timing is unavailable, do not claim the message is due; add `FOLLOW_UP_TIMING_UNVERIFIED` and require human timing review.
 
 #### Referred contact
@@ -243,7 +243,7 @@ Apply these defaults:
 | Customer names or reference list | State that customer information is confidential and check internally what may be shared. Do not disclose names. |
 | Previous supply relationship | Say records must be checked internally. Do not confirm or deny without evidence. |
 | Product availability or specification | Confirm only supplied facts; otherwise say the requested grade or specification will be checked. |
-| Product outside the approved portfolio | Say it needs confirmation with the factory or manufacturing partner; promise only an update after confirmation; add `NON_CATALOG_PRODUCT_REQUIRES_FACTORY_CONFIRMATION`. |
+| Product outside the approved portfolio | Say it needs confirmation with a relevant production partner; promise only an update after confirmation; add `NON_CATALOG_PRODUCT_REQUIRES_PRODUCTION_PARTNER_CONFIRMATION`. |
 | Certification, test result, TDS, or SDS | Confirm only documents present in the input; otherwise say availability will be checked. |
 | Information already sent | Follow up on receipt, suitability, or remaining questions. Do not resend or reintroduce unless requested. |
 
@@ -257,7 +257,7 @@ When a brief introduction is needed and no conflicting input exists, use only th
 - Relevant product areas include refractory raw materials, abrasives, and nonmetallic industrial minerals.
 - Aceler serves international B2B customers and supports catalog and customized requirements.
 
-Use the approved portfolio and the standard factory/trading/Okayama Giken Minerals explanations only from [references/business-facts.md](references/business-facts.md). Answer those questions directly and proportionately. Do not claim that every product is self-produced, and do not describe Aceler as merely a trader.
+Use the approved portfolio and the standard trading/supply-chain/Okayama Giken Minerals explanations only from [references/business-facts.md](references/business-facts.md). Answer those questions directly and proportionately. Present Aceler as a trading and supply-chain partner working with long-term production partners; never describe Aceler as a factory or manufacturer, call a production partner "our factory," or claim self-production or owned production capacity.
 
 Do not add certifications, customer names, country-specific supply history, guaranteed quality levels, or exact years of experience unless included in the current input.
 
@@ -304,7 +304,7 @@ Return `no_message` when one of these is true:
 - the customer explicitly asked not to be contacted;
 - a promised future contact date has not arrived;
 - a `no_current_demand` record is inside the 30-day minimum interval, lacks evidence that follow-up is due, or contains no new reason to reconnect;
-- an unknown-demand or referred-contact record already has two unanswered short-cycle attempts;
+- a referred-contact record already has two unanswered outreach attempts;
 - the requested message would only repeat an already completed action with no useful next step.
 
 Otherwise return `generated`.
@@ -327,8 +327,8 @@ Before returning, verify:
 - the salesperson name and signature use the mapped or customer-confirmed
   English identity, with no Chinese characters;
 - unsupported portions are safely deferred rather than invented;
-- products outside the approved portfolio are deferred for factory or manufacturing-partner confirmation without an availability promise;
-- factory/trading and Aceler/Okayama explanations use only approved business facts;
+- products outside the approved portfolio are deferred for production-partner confirmation without an availability promise;
+- trading/supply-chain and Aceler/Okayama explanations use only approved business facts;
 - the draft does not request, invite, or suggest communication through another channel;
 - no pricing, disclosure, or unsupported commitment appears;
 - warnings stay outside the customer-facing body;

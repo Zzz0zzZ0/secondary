@@ -25,12 +25,13 @@ Notes 已由 `app.secondary.notes_followup` 正式接入 Poller。本目录保�
 Notes 将完整会话收敛为五种动作：`reply`、`internal_task`、`referral`、
 `no_action`、`manual_review`。只有 `reply` 和 `referral` 会形成客户草稿；需要先准备
 资料或核实事实的 `internal_task`，以及无法自动判断的 `manual_review`，会进入独立的
-“会话动作”队列。`internal_task` 同时保存一份供销售复制完善的处理草稿；附件仍由销售
-在邮箱中人工添加，不会进入消息审核队列或 Outbox。
+“会话动作”队列。`internal_task` 同时保存一条直接面向销售的中文执行动作，说明需要
+准备、核实或完成什么；它不是邮件草稿，不会进入消息审核队列或 Outbox。
 
 判断和生成是两次独立的 Hermes 调用。第一次只能返回动作、理由和证据索引；第二次仅在
-动作是 `reply`、`referral` 或 `internal_task` 时运行，只能返回主题和正文，不能重新分类。代码分别校验
-两个 JSON 契约，并把语义结果单独保存在审阅快照中；不使用正文正则或关键词代替判断。
+动作是 `reply` 或 `referral` 时生成客户邮件；`internal_task` 则生成一至三步中文销售动作，
+不能重新分类。代码分别校验语义、客户草稿和销售动作 JSON 契约，并把语义结果单独保存在
+审阅快照中；不使用正文正则或关键词代替判断。
 语义结果必须同时给出联系权限：明确停止联系时，即使同一封邮件还提到转交或推荐，也
 必须是 `blocked + no_action`；权限不明确时进入人工复核。生成层和发布层都只接受
 `allowed`。

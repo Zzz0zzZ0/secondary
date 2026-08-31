@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-experience="focused" data-focused-view="review">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -11,14 +11,89 @@
       <header class="hero">
         <div>
           <p class="eyebrow">Aceler International · Review Only</p>
-          <h1>Hermes 消息审阅</h1>
-          <p>集中查看待审消息、会话动作、二级线索状态和 Outbox 投递记录。</p>
+          <h1>Hermes 发信工作台</h1>
+          <p>客户来信优先，其次按计划跟进时间处理待发消息；运行看板和审计记录保留在下方。</p>
         </div>
         <div class="hero-badges">
           <span class="safety">人工审阅固定开启</span>
-          <span class="safety">页面发信已禁用</span>
+          <span class="safety">页面不直接发送；批准后进入 Outbox</span>
         </div>
       </header>
+
+      <nav class="focused-view-switcher" aria-label="工作台视图">
+        <div class="focused-view-actions">
+          <button type="button" data-focused-view="review" aria-pressed="true">发信审核</button>
+          <button type="button" data-focused-view="operations" aria-pressed="false">运行与审计</button>
+        </div>
+      </nav>
+
+      <section class="send-workbench" aria-labelledby="send-workbench-title">
+        <div class="workbench-heading">
+          <div>
+            <p class="eyebrow dashboard-eyebrow">Follow-up priority</p>
+            <h2 id="send-workbench-title">待处理发信</h2>
+            <p class="muted">优先处理客户来信，再处理严重逾期、已到期和即将到期的跟进。</p>
+          </div>
+          <div id="review-priority-stats" class="priority-stats" aria-live="polite"></div>
+        </div>
+
+        <div class="control-panel">
+          <div class="review-controls">
+            <div class="primary-review-controls">
+              <button id="review-messages-button" type="button">刷新待处理发信</button>
+              <label class="filter review-search">搜索
+                <input id="review-search" type="search" placeholder="公司、联系人或邮箱" autocomplete="off">
+              </label>
+              <label class="filter">处理优先级
+                <select id="review-priority-filter">
+                  <option value="">全部</option>
+                  <option value="customer_reply">客户来信待回复</option>
+                  <option value="overdue_48h">严重逾期</option>
+                  <option value="overdue">已到期</option>
+                  <option value="due_24h">24 小时内</option>
+                  <option value="scheduled">后续排期</option>
+                  <option value="unscheduled">待排期</option>
+                </select>
+              </label>
+              <label class="filter">渠道
+                <select id="review-channel-filter">
+                  <option value="">全部</option>
+                  <option value="email">邮件</option>
+                  <option value="linkedin">领英</option>
+                </select>
+              </label>
+              <button id="review-clear-filters" type="button">清空筛选</button>
+            </div>
+            <details class="secondary-review-controls">
+              <summary>更多筛选与队列</summary>
+              <div class="secondary-review-controls-content">
+                <label class="filter">销售
+                  <select id="review-sales-filter">
+                    <option value="">全部</option>
+                  </select>
+                </label>
+                <label class="filter">处理路由
+                  <select id="review-route-filter">
+                    <option value="">全部</option>
+                  </select>
+                </label>
+                <button id="conversation-actions-button" type="button">处理会话动作</button>
+                <button id="outbox-queue-button" type="button">查看 Outbox 投递队列</button>
+                <button id="poll-queue-button" type="button">查看二级线索队列</button>
+              </div>
+            </details>
+          </div>
+          <div id="status" class="status" aria-live="polite">正在加载待处理发信…</div>
+        </div>
+
+        <section id="workspace" class="workspace hidden">
+          <aside>
+            <div class="section-title"><h2 id="record-list-title">待处理发信</h2><span id="record-count"></span></div>
+            <div id="record-list" class="record-list"></div>
+          </aside>
+          <article id="detail" class="detail"></article>
+        </section>
+      </section>
 
       <section class="polling-dashboard" aria-labelledby="dashboard-title">
         <div class="dashboard-heading">
@@ -94,40 +169,6 @@
         <pre id="runtime-report-content" class="runtime-report-content">暂无运行报告</pre>
       </section>
 
-      <section class="control-panel">
-        <div class="review-controls">
-          <button id="review-messages-button" type="button">审核待发送消息</button>
-          <label class="filter">渠道
-            <select id="review-channel-filter">
-              <option value="">全部</option>
-              <option value="email">邮件</option>
-              <option value="linkedin">领英</option>
-            </select>
-          </label>
-          <label class="filter">销售
-            <select id="review-sales-filter">
-              <option value="">全部</option>
-            </select>
-          </label>
-          <label class="filter">处理路由
-            <select id="review-route-filter">
-              <option value="">全部</option>
-            </select>
-          </label>
-          <button id="conversation-actions-button" type="button">处理会话动作</button>
-          <button id="outbox-queue-button" type="button">查看 Outbox 投递队列</button>
-          <button id="poll-queue-button" type="button">查看二级线索队列</button>
-        </div>
-        <div id="status" class="status" aria-live="polite">请选择需要查看的队列</div>
-      </section>
-
-      <section id="workspace" class="workspace hidden">
-        <aside>
-          <div class="section-title"><h2 id="record-list-title">审阅内容</h2><span id="record-count"></span></div>
-          <div id="record-list" class="record-list"></div>
-        </aside>
-        <article id="detail" class="detail"></article>
-      </section>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

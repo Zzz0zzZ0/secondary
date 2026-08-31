@@ -24,7 +24,6 @@ INTERVAL_RANGES_DAYS = {
     "referred": (1, 3),
     "below_moq": (60, 90),
 }
-SHORT_CYCLE_TYPES = {"unknown_demand", "referred"}
 QUEUE_STATUSES = {
     "settling",
     "classifying",
@@ -41,7 +40,14 @@ QUEUE_STATUSES = {
 
 
 def interval_days(lead_type: str, lead_id: str, sequence: int) -> int:
-    low, high = INTERVAL_RANGES_DAYS[lead_type]
+    if sequence >= 3:
+        low, high = 90, 120
+    elif sequence == 2:
+        low, high = 60, 90
+    elif sequence == 1 and lead_type in {"unknown_demand", "referred"}:
+        low, high = 30, 45
+    else:
+        low, high = INTERVAL_RANGES_DAYS[lead_type]
     seed = hashlib.sha256(
         f"{lead_id}:{lead_type}:{sequence}".encode("utf-8")
     ).hexdigest()

@@ -1,0 +1,23 @@
+{
+  "version": "business-knowledge-v1",
+  "entries": [
+    {
+      "id": "company.positioning",
+      "use_mode": "direct_answer",
+      "scopes": ["secondary_message", "notes_semantic", "notes_draft"],
+      "text": "Aceler is an industrial-mineral and refractory trading and supply-chain partner working with a long-term network of specialized production partners."
+    },
+    {
+      "id": "company.production_role",
+      "use_mode": "direct_answer",
+      "scopes": ["secondary_message", "notes_semantic", "notes_draft"],
+      "text": "Do not describe Aceler as a factory or manufacturer, claim owned production capacity, call a production partner 'our factory,' or identify products as self-produced."
+    },
+    {
+      "id": "product.non_catalog",
+      "use_mode": "internal_task",
+      "scopes": ["secondary_message", "notes_semantic", "notes_draft"],
+      "text": "A non-catalog product requires confirmation with a relevant production partner. Do not promise availability, specifications, documents, price, or timing before confirmation."
+    }
+  ]
+}

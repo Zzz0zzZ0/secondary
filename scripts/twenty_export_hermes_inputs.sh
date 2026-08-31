@@ -110,6 +110,7 @@ WITH secondary_records AS (
         'updated_at', person."updatedAt",
         'last_response_at', person."lastResponse",
         'last_follow_up_at', person."lastFollowUp",
+        'next_follow_up_at', person."nextFollowUp",
         'reactivation_at', person."reactivationDate",
         'next_step', person."nextStep"
       )),

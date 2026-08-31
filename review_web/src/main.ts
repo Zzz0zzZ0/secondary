@@ -16,6 +16,20 @@ type ReviewMessage = {
   created_at: string;
   updated_at: string;
 };
+type ReviewPriorityKind =
+  | "customer_reply"
+  | "overdue_48h"
+  | "overdue"
+  | "due_24h"
+  | "scheduled"
+  | "unscheduled";
+type ReviewPriority = {
+  kind: ReviewPriorityKind;
+  label: string;
+  rank: number;
+  at: string | null;
+  timing: string;
+};
 type ConversationAction = {
   id: string;
   run_id: string;
@@ -161,6 +175,16 @@ type LeadDetail = {
 const reviewMessagesButton = document.querySelector<HTMLButtonElement>(
   "#review-messages-button",
 )!;
+const reviewPriorityFilter = document.querySelector<HTMLSelectElement>(
+  "#review-priority-filter",
+)!;
+const reviewPriorityStats = document.querySelector<HTMLElement>(
+  "#review-priority-stats",
+)!;
+const reviewSearch = document.querySelector<HTMLInputElement>("#review-search")!;
+const reviewClearFilters = document.querySelector<HTMLButtonElement>(
+  "#review-clear-filters",
+)!;
 const reviewChannelFilter = document.querySelector<HTMLSelectElement>(
   "#review-channel-filter",
 )!;
@@ -171,6 +195,7 @@ const reviewRouteFilter = document.querySelector<HTMLSelectElement>(
   "#review-route-filter",
 )!;
 let pendingReviewAll: ReviewMessage[] = [];
+let visibleReviewMessages: ReviewMessage[] = [];
 const conversationActionsButton = document.querySelector<HTMLButtonElement>(
   "#conversation-actions-button",
 )!;
@@ -229,7 +254,8 @@ const warningLabels: Record<string, string> = {
   SELECTED_CHANNEL_MISSING: "缺少所选渠道地址",
   COMPANY_CONTEXT_MISSING: "公司背调缺失",
   COMPANY_CONTEXT_THIN: "公司背调信息不足",
-  NON_CATALOG_PRODUCT_REQUIRES_FACTORY_CONFIRMATION: "非目录产品需要向工厂确认",
+  NON_CATALOG_PRODUCT_REQUIRES_PRODUCTION_PARTNER_CONFIRMATION: "非目录产品需要向生产合作方确认",
+  NON_CATALOG_PRODUCT_REQUIRES_FACTORY_CONFIRMATION: "非目录产品需要向生产合作方确认（旧记录）",
   CONTACT_NAME_LOW_CONFIDENCE: "联系人姓名可信度较低",
   INQUIRY_CONTEXT_MISSING: "未关联到具体询盘正文",
   INTERNAL_CONFIRMATION_REQUIRED: "需要内部确认",
@@ -333,6 +359,109 @@ function formatDateTime(value: unknown): string {
     minute: "2-digit",
     hour12: false,
   }).format(date);
+}
+
+function reviewScheduleAt(message: ReviewMessage): string | null {
+  const snapshot = message.crm_snapshot || {};
+  const contact = snapshot.contact || {};
+  const lead = snapshot.lead || {};
+  const value =
+    contact.nextFollowUp ||
+    contact.next_follow_up_at ||
+    lead.nextFollowUp ||
+    lead.next_follow_up_at ||
+    snapshot.follow_up_schedule?.effective_next_follow_up_at ||
+    snapshot.secondary_lead_schedule?.next_action_at ||
+    lead.next_eligible_follow_up_at;
+  return value ? String(value) : null;
+}
+
+function reviewPriority(message: ReviewMessage, now = Date.now()): ReviewPriority {
+  const snapshot = message.crm_snapshot || {};
+  if (snapshot.message_route === "email_reply") {
+    const at =
+      snapshot.review_context?.crm_email_evidence?.email_at ||
+      snapshot.source_version?.activity_at ||
+      message.created_at;
+    return {
+      kind: "customer_reply",
+      label: "客户来信待回复",
+      rank: 0,
+      at: String(at),
+      timing: `客户来信 ${formatDateTime(at)}`,
+    };
+  }
+
+  const at = reviewScheduleAt(message);
+  const dueAt = at ? new Date(at).getTime() : Number.NaN;
+  if (!at || Number.isNaN(dueAt)) {
+    return {
+      kind: "unscheduled",
+      label: "待排期",
+      rank: 5,
+      at: null,
+      timing: "尚未排期",
+    };
+  }
+  if (dueAt <= now - 48 * 60 * 60 * 1000) {
+    return {
+      kind: "overdue_48h",
+      label: "严重逾期",
+      rank: 1,
+      at,
+      timing: `计划 ${formatDateTime(at)}`,
+    };
+  }
+  if (dueAt <= now) {
+    return {
+      kind: "overdue",
+      label: "已到期",
+      rank: 2,
+      at,
+      timing: `计划 ${formatDateTime(at)}`,
+    };
+  }
+  if (dueAt <= now + 24 * 60 * 60 * 1000) {
+    return {
+      kind: "due_24h",
+      label: "24 小时内",
+      rank: 3,
+      at,
+      timing: `计划 ${formatDateTime(at)}`,
+    };
+  }
+  return {
+    kind: "scheduled",
+    label: "后续排期",
+    rank: 4,
+    at,
+    timing: `计划 ${formatDateTime(at)}`,
+  };
+}
+
+function renderReviewPriorityStats(records: ReviewMessage[]): void {
+  const priorities = records.map((message) => reviewPriority(message).kind);
+  const stats = [
+    ["全部待处理", records.length],
+    ["客户来信待回复", priorities.filter((kind) => kind === "customer_reply").length],
+    [
+      "逾期跟进",
+      priorities.filter((kind) => kind === "overdue_48h" || kind === "overdue").length,
+    ],
+    ["24 小时内", priorities.filter((kind) => kind === "due_24h").length],
+  ];
+  reviewPriorityStats.replaceChildren(
+    ...stats.map(([label, value]) => {
+      const node = document.createElement("div");
+      node.className = "priority-stat";
+      const strong = document.createElement("strong");
+      const span = document.createElement("span");
+      strong.textContent = String(value);
+      span.textContent = String(label);
+      node.append(strong, span);
+      return node;
+    }),
+  );
 }
 
 function countFor(counts: Record<string, number>, statuses: string[]): number {
@@ -672,14 +801,54 @@ function field(label: string, value: unknown): HTMLElement {
   return row;
 }
 
-function block(title: string, content: unknown): HTMLElement {
+function block(
+  title: string,
+  content: unknown,
+  options: { collapsible?: boolean } = {},
+): HTMLElement {
   const section = document.createElement("section");
-  const heading = document.createElement("h3");
   const pre = document.createElement("pre");
-  heading.textContent = title;
   pre.textContent = text(content);
+  if (options.collapsible) {
+    const disclosure = document.createElement("details");
+    const summary = document.createElement("summary");
+    section.className = "evidence-disclosure";
+    summary.textContent = title;
+    disclosure.append(summary, pre);
+    section.append(disclosure);
+    return section;
+  }
+  const heading = document.createElement("h3");
+  heading.textContent = title;
   section.append(heading, pre);
   return section;
+}
+
+function selectReviewMessage(messageId: string, focusListItem = false): void {
+  const message = visibleReviewMessages.find((item) => item.id === messageId);
+  const button = recordList.querySelector<HTMLButtonElement>(
+    `[data-message-id="${CSS.escape(messageId)}"]`,
+  );
+  if (!message || !button) return;
+  recordList.querySelectorAll<HTMLButtonElement>(".record-item").forEach((item) => {
+    const active = item === button;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-current", active ? "true" : "false");
+  });
+  renderReviewMessageDetail(message);
+  button.scrollIntoView({ block: "nearest" });
+  if (focusListItem) button.focus();
+}
+
+function selectNextReviewMessage(messageId: string): void {
+  const index = visibleReviewMessages.findIndex((item) => item.id === messageId);
+  const next = visibleReviewMessages[index + 1];
+  if (!next) {
+    setStatus("已到当前筛选结果的最后一条", "success");
+    return;
+  }
+  selectReviewMessage(next.id, true);
+  setStatus(`已进入下一条（${index + 2}/${visibleReviewMessages.length}）`, "success");
 }
 
 function renderReviewMessageDetail(message: ReviewMessage) {
@@ -690,6 +859,7 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   const sales = snapshot.sales || {};
   const output = message.effective_output || {};
   const content = output.content || {};
+  const priority = reviewPriority(message);
 
   const crmPanel = document.createElement("div");
   crmPanel.className = "panel";
@@ -711,6 +881,8 @@ function renderReviewMessageDetail(message: ReviewMessage) {
     ["收件地址", message.recipient_original],
     ["销售", sales.name],
     ["渠道", message.channel === "email" ? "邮件" : "LinkedIn"],
+    ["处理优先级", priority.label],
+    ["优先依据", priority.timing],
     ["处理路由", messageRouteLabels[snapshot.message_route] || snapshot.message_route],
     [
       "会话动作",
@@ -737,6 +909,7 @@ function renderReviewMessageDetail(message: ReviewMessage) {
       block(
         "完整邮件上下文",
         emailHistoryText(snapshot.review_context.crm_email_history),
+        { collapsible: true },
       ),
     );
   }
@@ -822,16 +995,20 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   const regenerateButton = document.createElement("button");
   const approveButton = document.createElement("button");
   const rejectButton = document.createElement("button");
-  saveButton.type = regenerateButton.type = approveButton.type = rejectButton.type = "button";
+  const nextButton = document.createElement("button");
+  saveButton.type = regenerateButton.type = approveButton.type = rejectButton.type =
+    nextButton.type = "button";
   saveButton.textContent = "保存修改";
   regenerateButton.textContent = "让 Hermes 重新生成";
   approveButton.textContent = "批准并进入 Outbox";
   rejectButton.textContent = "拒绝";
+  nextButton.textContent = "下一条";
   saveButton.className = "secondary";
   regenerateButton.className = "regenerate";
   approveButton.className = "approve";
   rejectButton.className = "reject";
-  actions.append(saveButton, regenerateButton, approveButton, rejectButton);
+  nextButton.className = "next";
+  actions.append(saveButton, regenerateButton, approveButton, rejectButton, nextButton);
   if (approvalBlocked) {
     approveButton.disabled = true;
     approveButton.title = notesReviewOnly
@@ -845,6 +1022,7 @@ function renderReviewMessageDetail(message: ReviewMessage) {
     approveButton,
     rejectButton,
   ];
+  nextButton.addEventListener("click", () => selectNextReviewMessage(message.id));
   const setBusy = (busy: boolean) => {
     buttons.forEach((button) => {
       button.disabled = busy || (
@@ -923,7 +1101,7 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   });
 
   approveButton.addEventListener("click", async () => {
-    if (!window.confirm("确认批准该消息并创建 Outbox 投递任务？")) return;
+    if (!window.confirm("页面不会直接发送。确认批准该消息并创建 Outbox 投递任务？")) return;
     setBusy(true);
     setStatus("正在批准消息并写入 Outbox…", "running");
     try {
@@ -984,41 +1162,40 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   reviewPanel.append(
     reviewHeading,
     editor,
-    block("中文对照（仅供审阅）", content.body_zh),
+    block("中文对照（仅供审阅）", content.body_zh, { collapsible: true }),
   );
   detail.replaceChildren(crmPanel, reviewPanel);
 }
 
 function renderReviewMessages(records: ReviewMessage[]) {
+  visibleReviewMessages = records;
   recordList.replaceChildren();
   detail.replaceChildren();
-  recordListTitle.textContent = "待发送消息";
+  recordListTitle.textContent = "待处理发信";
   recordCount.textContent = `${records.length} 条`;
   records.forEach((message, index) => {
     const company = message.crm_snapshot?.company?.name;
     const contact = message.crm_snapshot?.contact?.name;
     const route = message.crm_snapshot?.message_route || "default";
+    const priority = reviewPriority(message);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "record-item";
+    button.dataset.priorityKind = priority.kind;
+    button.dataset.messageId = message.id;
+    button.setAttribute("aria-current", "false");
     const title = document.createElement("strong");
     const subtitle = document.createElement("span");
     title.textContent = text(company, "未知公司");
     subtitle.textContent = `${text(contact, "未知联系人")} · ${
-      message.channel === "email" ? "邮件" : "LinkedIn"
-    }`;
+      messageRouteLabels[route] || route
+    } · ${priority.timing}`;
     button.append(
       title,
       subtitle,
-      badge(messageRouteLabels[route] || route, route),
+      badge(priority.label, `priority-${priority.kind}`),
     );
-    button.addEventListener("click", () => {
-      recordList
-        .querySelectorAll(".active")
-        .forEach((node) => node.classList.remove("active"));
-      button.classList.add("active");
-      renderReviewMessageDetail(message);
-    });
+    button.addEventListener("click", () => selectReviewMessage(message.id));
     recordList.append(button);
     if (index === 0) button.click();
   });
@@ -1031,7 +1208,7 @@ function renderReviewMessages(records: ReviewMessage[]) {
 function renderConversationActionDetail(action: ConversationAction) {
   const snapshot = action.crm_snapshot || {};
   const evidence = snapshot.review_context?.crm_email_evidence || {};
-  const salesDraft = action.analysis?.sales_draft?.content;
+  const salesAction = action.analysis?.sales_action?.action;
   const panel = document.createElement("div");
   panel.className = "panel";
   const heading = document.createElement("div");
@@ -1054,25 +1231,22 @@ function renderConversationActionDetail(action: ConversationAction) {
   panel.append(
     heading,
     fields,
-    block("Hermes 判断理由", action.analysis?.reason),
+    block(
+      action.action_type === "internal_task" ? "销售需要执行" : "需要人工判断",
+      salesAction || action.analysis?.reason,
+    ),
+  );
+  if (salesAction) {
+    panel.append(block("Hermes 判断理由", action.analysis?.reason));
+  }
+  panel.append(
     block("关键证据", evidence.evidence_quote),
     block(
       "Notes 邮件上下文",
       emailHistoryText(snapshot.review_context?.crm_email_history) || evidence.note_text,
+      { collapsible: true },
     ),
   );
-  if (action.action_type === "internal_task" && salesDraft) {
-    panel.append(
-      block(
-        "销售处理草稿",
-        `${text(salesDraft.subject)}\n\n${text(salesDraft.body)}`,
-      ),
-      block(
-        "中文对照",
-        `${text(salesDraft.subject_zh)}\n\n${text(salesDraft.body_zh)}`,
-      ),
-    );
-  }
 
   const reviewPanel = document.createElement("div");
   reviewPanel.className = "panel output-panel";
@@ -1135,7 +1309,7 @@ function renderConversationActionDetail(action: ConversationAction) {
     reviewHeading,
     block(
       "安全边界",
-      "此队列只记录内部动作。销售处理草稿仅供复制完善，附件需在邮箱中人工添加；不会创建待发送消息，也没有进入 Outbox 的入口。",
+      "此队列只记录给销售的内部动作，不生成客户邮件，也没有进入 Outbox 的入口。完成准备或核实后，再由销售决定如何回复客户。",
     ),
     form,
   );
@@ -1545,6 +1719,7 @@ async function loadReviewMessages() {
       "/api/review/messages?status=pending_review&limit=200",
     );
     pendingReviewAll = result.records;
+    renderReviewPriorityStats(pendingReviewAll);
     refreshSalesFilterOptions(pendingReviewAll);
     refreshRouteFilterOptions(pendingReviewAll);
     applyReviewFilters();
@@ -1586,20 +1761,47 @@ async function loadConversationActions() {
 }
 
 function filterReviewMessages(records: ReviewMessage[]): ReviewMessage[] {
+  const search = reviewSearch.value.trim().toLocaleLowerCase();
+  const priorityKind = reviewPriorityFilter.value;
   const channel = reviewChannelFilter.value;
   const sales = reviewSalesFilter.value;
   const route = reviewRouteFilter.value;
-  return records.filter((message) => {
-    if (channel && message.channel !== channel) return false;
-    if (sales) {
-      const name = (message.crm_snapshot?.sales || {}).name;
-      if (name !== sales) return false;
-    }
-    if (route && (message.crm_snapshot?.message_route || "default") !== route) {
-      return false;
-    }
-    return true;
-  });
+  const now = Date.now();
+  return records
+    .filter((message) => {
+      if (search) {
+        const snapshot = message.crm_snapshot || {};
+        const haystack = [
+          snapshot.company?.name,
+          snapshot.contact?.name,
+          message.recipient_original,
+          snapshot.sales?.name,
+          messageRouteLabels[snapshot.message_route] || snapshot.message_route,
+        ].map((value) => text(value, "").toLocaleLowerCase()).join(" ");
+        if (!haystack.includes(search)) return false;
+      }
+      if (priorityKind && reviewPriority(message, now).kind !== priorityKind) return false;
+      if (channel && message.channel !== channel) return false;
+      if (sales) {
+        const name = (message.crm_snapshot?.sales || {}).name;
+        if (name !== sales) return false;
+      }
+      if (route && (message.crm_snapshot?.message_route || "default") !== route) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => {
+      const leftPriority = reviewPriority(left, now);
+      const rightPriority = reviewPriority(right, now);
+      if (leftPriority.rank !== rightPriority.rank) {
+        return leftPriority.rank - rightPriority.rank;
+      }
+      const leftAt = leftPriority.at ? new Date(leftPriority.at).getTime() : Number.MAX_VALUE;
+      const rightAt = rightPriority.at ? new Date(rightPriority.at).getTime() : Number.MAX_VALUE;
+      if (leftAt !== rightAt) return leftAt - rightAt;
+      return new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+    });
 }
 
 function refreshSalesFilterOptions(records: ReviewMessage[]): void {
@@ -1689,7 +1891,7 @@ conversationActionsButton.addEventListener("click", async () => {
   }
 });
 
-reviewChannelFilter.addEventListener("change", () => {
+function handleReviewFilterChange(): void {
   if (!pendingReviewAll.length) return;
   applyReviewFilters();
   const total = pendingReviewAll.length;
@@ -1700,32 +1902,44 @@ reviewChannelFilter.addEventListener("change", () => {
       : `已加载 ${total} 条待审消息，过滤后显示 ${filtered.length} 条`,
     filtered.length ? "success" : "",
   );
+}
+
+reviewPriorityFilter.addEventListener("change", handleReviewFilterChange);
+reviewChannelFilter.addEventListener("change", handleReviewFilterChange);
+reviewSalesFilter.addEventListener("change", handleReviewFilterChange);
+reviewRouteFilter.addEventListener("change", handleReviewFilterChange);
+reviewSearch.addEventListener("input", handleReviewFilterChange);
+reviewClearFilters.addEventListener("click", () => {
+  reviewSearch.value = "";
+  reviewPriorityFilter.value = "";
+  reviewChannelFilter.value = "";
+  reviewSalesFilter.value = "";
+  reviewRouteFilter.value = "";
+  handleReviewFilterChange();
+  reviewSearch.focus();
 });
 
-reviewSalesFilter.addEventListener("change", () => {
-  if (!pendingReviewAll.length) return;
-  applyReviewFilters();
-  const total = pendingReviewAll.length;
-  const filtered = filterReviewMessages(pendingReviewAll);
-  setStatus(
-    filtered.length === total
-      ? `已加载 ${total} 条待审消息`
-      : `已加载 ${total} 条待审消息，过滤后显示 ${filtered.length} 条`,
-    filtered.length ? "success" : "",
-  );
+recordList.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const buttons = [...recordList.querySelectorAll<HTMLButtonElement>(".record-item")];
+  if (!buttons.length) return;
+  const active = recordList.querySelector<HTMLButtonElement>(".record-item.active");
+  const current = Math.max(0, buttons.indexOf(active || buttons[0]));
+  const offset = event.key === "ArrowDown" ? 1 : -1;
+  const target = buttons[Math.min(buttons.length - 1, Math.max(0, current + offset))];
+  event.preventDefault();
+  target.click();
+  target.focus();
 });
 
-reviewRouteFilter.addEventListener("change", () => {
-  if (!pendingReviewAll.length) return;
-  applyReviewFilters();
-  const total = pendingReviewAll.length;
-  const filtered = filterReviewMessages(pendingReviewAll);
-  setStatus(
-    filtered.length === total
-      ? `已加载 ${total} 条待审消息`
-      : `已加载 ${total} 条待审消息，过滤后显示 ${filtered.length} 条`,
-    filtered.length ? "success" : "",
-  );
+document.querySelectorAll<HTMLButtonElement>("button[data-focused-view]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const view = button.dataset.focusedView || "review";
+    document.documentElement.dataset.focusedView = view;
+    document.querySelectorAll<HTMLButtonElement>("button[data-focused-view]").forEach((item) => {
+      item.setAttribute("aria-pressed", String(item === button));
+    });
+  });
 });
 
 outboxQueueButton.addEventListener("click", async () => {
@@ -1783,5 +1997,6 @@ runtimeReportDate.addEventListener("change", () => {
     });
 });
 
+loadReviewMessages().catch(showError);
 loadDashboard().catch(() => undefined);
 loadRuntimeReports().catch(() => undefined);

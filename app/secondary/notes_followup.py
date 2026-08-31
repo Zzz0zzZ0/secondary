@@ -269,7 +269,7 @@ class NotesFollowUpProcessor:
                 UPDATE notes_follow_up_state
                 SET status = 'superseded', updated_at = ?
                 WHERE lead_id = ? AND latest_note_id != ?
-                  AND status IN ('pending', 'processing', 'retry_wait')
+                  AND status != 'superseded'
                 """,
                 (now_text, lead_id, note_id),
             )
