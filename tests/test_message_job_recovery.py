@@ -7,6 +7,39 @@ from app.secondary_scheduler import SecondaryLeadScheduler
 
 
 class MessageJobRecoveryTest(unittest.TestCase):
+    def test_restart_requeues_interrupted_classification_once(self):
+        now = datetime(2026, 9, 11, 8, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory), environment={}, now=lambda: now,
+            )
+            for lead_id in ("interrupted", "untouched"):
+                scheduler._upsert_discovered({
+                    "lead": {"id": lead_id},
+                    "source_version": {"record_id": lead_id, "updated_at": now.isoformat()},
+                })
+            with scheduler._connect() as connection:
+                connection.execute(
+                    "UPDATE secondary_lead_state SET status = 'classifying' WHERE lead_id = 'interrupted'"
+                )
+                untouched = tuple(connection.execute(
+                    "SELECT * FROM secondary_lead_state WHERE lead_id = 'untouched'"
+                ).fetchone())
+
+            self.assertEqual(1, scheduler._recover_interrupted_classifications())
+            self.assertEqual(0, scheduler._recover_interrupted_classifications())
+            with scheduler._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM secondary_lead_state WHERE lead_id = 'interrupted'"
+                ).fetchone()
+                self.assertEqual("settling", row["status"])
+                self.assertEqual(now.isoformat(), row["classification_due_at"])
+                self.assertEqual(now.isoformat(), row["updated_at"])
+                self.assertEqual("Recovered after scheduler restart", row["last_error"])
+                self.assertEqual(untouched, tuple(connection.execute(
+                    "SELECT * FROM secondary_lead_state WHERE lead_id = 'untouched'"
+                ).fetchone()))
+
     def test_reclassification_with_same_due_date_gets_a_fresh_message_job(self):
         now = datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
         record = {

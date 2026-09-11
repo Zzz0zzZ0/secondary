@@ -527,6 +527,7 @@ node review_web/tests/advance-review.cjs
 | 批准后消费者看不到任务 | 核对两份配置最终的数据库连接、渠道/provider Token 权限、任务状态及外部消费者日志 |
 | `sending` / `unknown` 卡住 | 先查实际渠道平台是否已接收/发送，再按投递协议人工处理；禁止直接重置重发 |
 | LaunchAgent `Bootstrap failed: 5` | 等待旧服务彻底卸载，检查 plist 路径、脚本权限和错误日志；不要连续重复安装制造竞争 |
+| Poller 反复退出，提示 `Incorrect number of bindings supplied`（4 个占位符、5 个参数） | 旧版本恢复中断分类的 SQL 参数错误；更新到包含该修复的版本后重启 Poller，未完成分类会自动重新排队，无需删除或手改状态库 |
 
 ## 代码与进一步阅读
 

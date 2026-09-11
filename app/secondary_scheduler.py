@@ -544,7 +544,6 @@ class SecondaryLeadScheduler:
                     """,
                     (
                         now_text,
-                        now_text,
                         "Recovered after scheduler restart",
                         now_text,
                         row["lead_id"],
