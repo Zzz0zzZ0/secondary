@@ -41,7 +41,7 @@ main { width: min(1420px, calc(100% - 40px)); margin: 0 auto; padding: 32px 0 64
 .workbench-heading p { margin: 5px 0 0; }
 .priority-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(100px, 1fr));
+  grid-template-columns: repeat(5, minmax(100px, 1fr));
   gap: 8px;
 }
 .priority-stat {
@@ -381,7 +381,7 @@ pre { margin: 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; 
 .badge.priority-overdue_48h { color: #922d2d; background: #f9dada; }
 .badge.priority-overdue { color: #8b5308; background: #ffe8bd; }
 .badge.priority-due_24h { color: #70500f; background: #fff0ca; }
-.badge.priority-scheduled, .badge.priority-unscheduled { color: #56615e; background: #e8ece9; }
+.badge.priority-unscheduled { color: #56615e; background: #e8ece9; }
 .hidden { display: none !important; }
 
 html[data-experience="focused"] .focused-view-switcher {
@@ -482,7 +482,7 @@ html[data-experience="focused"] summary:focus-visible {
 
 @media (max-width: 980px) {
   .workbench-heading { align-items: stretch; flex-direction: column; }
-  .priority-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .priority-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .dashboard-stats { grid-template-columns: 1fr 1fr; }
   .process-flow { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .flow-stage:nth-child(3)::after { display: none; }
@@ -524,3 +524,15 @@ html[data-experience="focused"] summary:focus-visible {
   html[data-experience="focused"] .review-actions { grid-template-columns: 1fr 1fr; }
   html[data-experience="focused"] .review-actions .next { grid-column: 1 / -1; }
 }
+
+/* Timing stays independent of the content review marker. */
+.badge.priority-advance_review { color: #1e5799; background: #e4efff; }
+.record-item[data-message-id] { border-left: 3px solid #b7c1bc; }
+.record-item[data-priority-kind="advance_review"] { border-left-color: #4b87cf; }
+.record-item[data-priority-kind="due_24h"] { border-left-color: #d3a132; }
+.record-item[data-priority-kind="overdue"] { border-left-color: #d18424; }
+.record-item[data-priority-kind="overdue_48h"] { border-left-color: #c55757; }
+.record-item[data-priority-kind="customer_reply"] { border-left-color: #289b76; }
+.content-review-state { grid-column: 1; color: #64726c; font-size: 11px; }
+
+html[data-experience="focused"] .review-actions .next { grid-column: auto; color: #176c5d; background: white; border: 1px solid #176c5d; }

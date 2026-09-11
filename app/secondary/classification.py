@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional
 from .domain import LEAD_TYPES
+from .referrals import crm_referral_context
 
 
 def _required_text(value: Any, field: str) -> str:
@@ -121,51 +122,59 @@ def validate_classification(
         "evidence_quote": follow_up_quote,
     }
 
-    normalized_recommenders = _grounded_people(
-        candidate.get("recommended_by"), note, "recommended_by"
-    )
-    candidate["recommended_by"] = normalized_recommenders
-    if candidate.get("lead_type") != "referred" and normalized_recommenders:
-        raise RuntimeError(
-            "Classification recommended_by is only valid for referred leads"
+    structured_referral = crm_referral_context(record)
+    if structured_referral:
+        candidate["model_lead_type"] = candidate["lead_type"]
+        candidate["lead_type"] = "referred"
+        candidate["classification_source"] = structured_referral["source"]
+        candidate["referral_relationship"] = structured_referral
+        candidate["recommended_by"] = structured_referral["recommended_by"]
+        relationship = structured_referral
+    else:
+        normalized_recommenders = _grounded_people(
+            candidate.get("recommended_by"), note, "recommended_by"
         )
+        candidate["recommended_by"] = normalized_recommenders
+        if candidate.get("lead_type") != "referred" and normalized_recommenders:
+            raise RuntimeError(
+                "Classification recommended_by is only valid for referred leads"
+            )
 
-    if "referral_relationship" not in candidate:
-        raise RuntimeError("Classification referral_relationship is missing")
-    relationship = candidate.get("referral_relationship")
-    if relationship is not None:
-        if candidate.get("lead_type") != "referred" or not isinstance(
-            relationship, dict
-        ):
-            raise RuntimeError("Classification referral_relationship is invalid")
-        current_role = relationship.get("current_contact_role")
-        if current_role not in {"recommender", "referred"}:
-            raise RuntimeError(
-                "Classification referral_relationship.current_contact_role is invalid"
+        if "referral_relationship" not in candidate:
+            raise RuntimeError("Classification referral_relationship is missing")
+        relationship = candidate.get("referral_relationship")
+        if relationship is not None:
+            if candidate.get("lead_type") != "referred" or not isinstance(
+                relationship, dict
+            ):
+                raise RuntimeError("Classification referral_relationship is invalid")
+            current_role = relationship.get("current_contact_role")
+            if current_role not in {"recommender", "referred"}:
+                raise RuntimeError(
+                    "Classification referral_relationship.current_contact_role is invalid"
+                )
+            related_contacts = _grounded_people(
+                relationship.get("related_contacts"),
+                note,
+                "referral_relationship.related_contacts",
             )
-        related_contacts = _grounded_people(
-            relationship.get("related_contacts"),
-            note,
-            "referral_relationship.related_contacts",
-        )
-        if not related_contacts:
-            raise RuntimeError(
-                "Classification referral_relationship.related_contacts is empty"
-            )
-        if (
-            current_role == "referred"
-            and normalized_recommenders != related_contacts
-        ):
-            raise RuntimeError(
-                "Classification recommended_by must match referral relationship"
-            )
-        if current_role == "recommender" and normalized_recommenders:
-            candidate["recommended_by"] = []
-        candidate["referral_relationship"] = {
-            "current_contact_role": current_role,
-            "related_contacts": related_contacts,
-        }
-
+            if not related_contacts:
+                raise RuntimeError(
+                    "Classification referral_relationship.related_contacts is empty"
+                )
+            if (
+                current_role == "referred"
+                and normalized_recommenders != related_contacts
+            ):
+                raise RuntimeError(
+                    "Classification recommended_by must match referral relationship"
+                )
+            if current_role == "recommender" and normalized_recommenders:
+                candidate["recommended_by"] = []
+            candidate["referral_relationship"] = {
+                "current_contact_role": current_role,
+                "related_contacts": related_contacts,
+            }
     structured_demands = lead.get("product_demands")
     has_structured_demand = (
         isinstance(structured_demands, list) and bool(structured_demands)

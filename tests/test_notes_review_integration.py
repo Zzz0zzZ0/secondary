@@ -77,6 +77,14 @@ class NotesReviewIntegrationTest(unittest.TestCase):
         }
         self.analysis = {"semantic": self.semantic, "draft": self.draft}
 
+    def test_crm_referral_links_reach_both_prompts_and_review_snapshot(self):
+        self.record["crm_referral"] = {"recommended_by": [], "referred_contacts": [{"id": "other-buyer", "name": "Related Buyer", "email": "other@example.com"}]}
+        snapshot = notes_trial.build_notes_review_snapshot(self.record, self.state, self.semantic)
+        self.assertEqual("recommender", snapshot["referral_context"]["current_contact_role"])
+        self.assertEqual("buyer@example.com", snapshot["contact"]["email"])
+        self.assertIn('"recommender"', notes_trial._semantic_prompt(self.record, self.latest, "Buddy"))
+        self.assertIn('"other-buyer"', notes_trial._draft_prompt(self.record, self.latest, "Buddy", self.semantic))
+
     def test_publish_builds_review_ui_payload_and_only_calls_pending_hook(self):
         created = Mock(return_value="message-version-1")
         with patch.object(notes_trial, "create_review_message", created):
@@ -121,6 +129,84 @@ class NotesReviewIntegrationTest(unittest.TestCase):
         self.assertEqual(self.draft["content"], output["content"])
         self.assertEqual(notes_trial.NOTES_REVIEW_WARNINGS, output["warnings"])
         self.assertNotIn("email_evidence", output)
+
+    def test_linkedin_card_parses_and_publishes_on_linkedin(self):
+        self.assertEqual(
+            "https://www.linkedin.com/in/mr-buyer/",
+            notes_trial._normalized_linkedin_url(
+                "www.linkedin.com/in/mr-buyer/?trk=crm"
+            ),
+        )
+        notes = notes_trial.parse_linkedin_context_note(
+            {
+                "note_id": "linkedin-note-1",
+                "note_title": "LinkedIn沟通 01 | Mr. Buyer | 2026-08-25",
+                "note_created_at": "2026-08-25T03:44:15+00:00",
+                "created_by_context": {
+                    "source": "crm.note.linkedin",
+                    "captured_at": "2026-08-25T03:44:15Z",
+                },
+                "body": """# LinkedIn 沟通上下文
+
+## 对话
+
+### 1 · 我方 · FRIDAY
+
+> Hello
+
+### 2 · 客户 · 2:16 PM
+
+> Please send the current specification.
+""",
+            }
+        )
+        self.assertEqual(["FA", "SHOU"], [note["direction"] for note in notes])
+        self.assertEqual("linkedin", notes[-1]["channel"])
+        state = notes_trial.structural_state(notes)
+        self.assertEqual("needs_analysis", state["state"])
+
+        self.record["contact_email"] = None
+        self.record["contact_linkedin_url"] = (
+            "https://www.linkedin.com/in/mr-buyer/"
+        )
+        self.record["notes"] = notes
+        self.latest = notes[-1]
+        self.state = state
+        self.semantic.update(
+            {
+                "latest_note_id": self.latest["note_id"],
+                "evidence_quote": "Please send the current specification.",
+            }
+        )
+        self.draft.update(
+            {
+                "latest_note_id": self.latest["note_id"],
+                "content": {
+                    "subject": None,
+                    "subject_zh": None,
+                    "body": "Thanks for your message. Which grade do you need?",
+                    "body_zh": "感谢您的消息。请问您需要什么牌号？",
+                },
+            }
+        )
+        created = Mock(return_value="linkedin-message-1")
+        with patch.object(notes_trial, "create_review_message", created):
+            result = notes_trial.publish_review(
+                self.record,
+                self.state,
+                {"semantic": self.semantic, "draft": self.draft},
+            )
+
+        self.assertEqual("linkedin-message-1", result["message_version_id"])
+        _run_id, _lead_id, snapshot, output = created.call_args.args
+        self.assertEqual("linkedin", snapshot["output"]["type"])
+        self.assertEqual(
+            self.record["contact_linkedin_url"],
+            snapshot["contact"]["linkedin_url"],
+        )
+        self.assertEqual("linkedin", output["output_type"])
+        self.assertIsNone(output["content"]["subject"])
+        self.assertEqual([], validation_errors(output, snapshot, "person-1"))
 
     def test_publish_internal_task_uses_action_queue_not_message_review(self):
         message_created = Mock(return_value="should-not-exist")

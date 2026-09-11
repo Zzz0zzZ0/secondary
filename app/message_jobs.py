@@ -499,9 +499,18 @@ class MessageJobProcessor:
         except json.JSONDecodeError as exc:
             return self._mark_failure(row, f"Invalid Hermes summary: {exc}")
         if summary.get("record_count") != 1 or summary.get("valid_count") != 1:
+            errors = []
+            for path in summary_path.parent.glob("records/*/validation_errors.json"):
+                try:
+                    detail = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(detail, list):
+                        errors.extend(str(item) for item in detail)
+                except (OSError, ValueError):
+                    pass
             return self._mark_failure(
                 row,
-                "Hermes output did not pass validation",
+                "Hermes output did not pass validation"
+                + (": " + "; ".join(errors)[:2000] if errors else ""),
             )
         try:
             artifacts = self._result_artifacts(row, summary_path)

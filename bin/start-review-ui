@@ -64,7 +64,9 @@ for _ in {1..40}; do
     if [[ -n "$LAN_IP" ]]; then
       printf 'Internal network URL: http://%s:%s\n' "$LAN_IP" "$PORT"
     fi
-    open "$URL" 2>/dev/null || printf 'Open %s\n' "$URL"
+    if [[ "${REVIEW_UI_OPEN_BROWSER:-true}" == "true" ]]; then
+      open "$URL" 2>/dev/null || printf 'Open %s\n' "$URL"
+    fi
     wait "$SERVER_PID"
     exit $?
   fi

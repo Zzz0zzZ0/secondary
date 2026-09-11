@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -21,6 +22,7 @@ from .outbox import (
     valid_linkedin,
 )
 from .conversation_actions import dismiss_pending_actions_for_lead
+from app.secondary.referrals import is_recommender, referral_context, read_referral_history, referral_history_check
 from .secondary.classification_runner import ClassificationRunner
 from .secondary.domain import (
     LEAD_TYPES,
@@ -30,8 +32,11 @@ from .secondary.domain import (
     interval_days,
 )
 from .secondary.message_policy import prepare_message_record
+from .secondary.channels import source_channel, outbound_channel
 from .secondary.notes_followup import NotesFollowUpProcessor
+from notes_trial import notes_trial as notes_core
 from .secondary.schema import initialize_schema
+from .secondary.review_timing import draft_at, review_lead_days
 from .message_jobs import (
     DEFAULT_PIPELINE_SCRIPT,
     DEFAULT_STATE_DIR,
@@ -49,7 +54,6 @@ DEFAULT_CLASSIFICATION_SKILL_DIR = (
 DEFAULT_EXPORT_SCRIPT = PROJECT_DIR / "scripts" / "twenty_export_hermes_inputs.sh"
 DEFAULT_DB_CHECK_SCRIPT = PROJECT_DIR / "scripts" / "twenty_db_check.sh"
 CLASSIFICATION_POLICY_VERSION = "secondary-lead-v7"
-SALES_FOLLOW_UP_TIME_UNVERIFIED = "SALES_FOLLOW_UP_TIME_UNVERIFIED"
 MESSAGE_JOB_STALE_AFTER = timedelta(minutes=30)
 
 
@@ -112,6 +116,25 @@ def _source_hash(record: Dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def _prefer_valid_contact_channel(record: Dict[str, Any]) -> None:
+    contact = record.get("contact") or {}
+    output = record.setdefault("output", {})
+    forced = source_channel((record.get("lead") or {}).get("source"))
+    if forced:
+        output["type"] = forced
+        return
+    if output.get("type") == "linkedin":
+        if not valid_linkedin(contact.get("linkedin_url")) and valid_email(
+            contact.get("email")
+        ):
+            output["type"] = "email"
+    elif output.get("type") == "email":
+        if not valid_email(contact.get("email")) and valid_linkedin(
+            contact.get("linkedin_url")
+        ):
+            output["type"] = "linkedin"
+
+
 def _validated_int(
     environment: Dict[str, str],
     name: str,
@@ -171,6 +194,7 @@ class SecondaryLeadScheduler:
 
     def maintain(self) -> Dict[str, int]:
         return {
+            "notes_follow_ups_resumed": self._resume_notes_follow_ups(),
             "settling_dates_repaired": self._repair_settling_due_dates(),
             "classifications_requeued": (
                 self._requeue_outdated_review_classifications()
@@ -201,6 +225,10 @@ class SecondaryLeadScheduler:
         return self.message_processor.connect()
 
     def _bind_notes_review(self, lead_id: str, message_version_id: str) -> None:
+        with self._connect() as connection:
+            current = connection.execute("SELECT * FROM secondary_lead_state WHERE lead_id=?", (lead_id,)).fetchone()
+        if current and is_recommender(self._json_value(current["crm_snapshot_json"], {}), self._classification_context(current)):
+            return
         now_text = isoformat(self.now())
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -330,6 +358,8 @@ class SecondaryLeadScheduler:
             raise RuntimeError("Secondary CRM scan must return an array of objects")
         if len(records) > limit:
             raise RuntimeError("Secondary CRM scan returned more than its batch limit")
+        for record in records:
+            _prefer_valid_contact_channel(record)
         return records
 
     def _record_identity(
@@ -514,6 +544,7 @@ class SecondaryLeadScheduler:
                     """,
                     (
                         now_text,
+                        now_text,
                         "Recovered after scheduler restart",
                         now_text,
                         row["lead_id"],
@@ -584,8 +615,8 @@ class SecondaryLeadScheduler:
                         AND job.next_attempt_at <= ?
                         AND (
                             state.status = 'generating'
-                            OR state.next_action_at IS NULL
-                            OR state.next_action_at > ?
+                            OR state.generation_retry_at IS NULL
+                            OR state.generation_retry_at > ?
                         )
                     )
                   )
@@ -618,13 +649,15 @@ class SecondaryLeadScheduler:
                     """
                     UPDATE secondary_lead_state
                     SET status = 'scheduled',
-                        next_action_at = ?,
+                        next_action_at = COALESCE(next_action_at, ?),
+                        generation_retry_at = ?,
                         last_error = ?,
                         updated_at = ?
                     WHERE lead_id = ?
                       AND status IN ('generating', 'scheduled')
                     """,
                     (
+                        now_text,
                         now_text,
                         "Recovered after scheduler restart",
                         now_text,
@@ -723,6 +756,7 @@ class SecondaryLeadScheduler:
                         status = 'settling',
                         classification_due_at = ?,
                         next_action_at = NULL,
+                        generation_retry_at = NULL,
                         follow_up_count = 0,
                         latest_analysis_job_id = NULL,
                         latest_message_version_id = NULL,
@@ -943,6 +977,70 @@ class SecondaryLeadScheduler:
     ) -> int:
         return interval_days(lead_type, lead_id, sequence)
 
+    def _resume_notes_follow_ups(self) -> int:
+        """No immediate reply does not end an otherwise permitted follow-up cycle."""
+        resumed = 0
+        now_text = isoformat(self.now())
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            notes = connection.execute(
+                "SELECT * FROM notes_follow_up_state "
+                "WHERE status = 'completed' AND decision = 'no_action'"
+            ).fetchall()
+            for note in notes:
+                semantic = self._json_value(note["analysis_json"], {}).get("semantic") or {}
+                snapshot = self._json_value(note["crm_snapshot_json"], {})
+                if semantic.get("contact_permission") != "allowed" or not any(
+                    item.get("direction") == "FA" and not item.get("transport_event")
+                    for item in snapshot.get("notes", [])
+                ):
+                    continue
+                state = connection.execute(
+                    "SELECT * FROM secondary_lead_state WHERE lead_id = ?",
+                    (note["lead_id"],),
+                ).fetchone()
+                if state is None or state["status"] not in {"settling", "scheduled"}:
+                    continue
+                record = self._json_value(state["crm_snapshot_json"], {})
+                classification = self._classification_context(state)
+                if is_recommender(record, classification):
+                    continue
+                if "DO_NOT_CONTACT" in (record.get("warnings") or []) or (
+                    classification and (classification.get("contact_permission") or {}).get("status") == "do_not_contact"
+                ):
+                    continue
+                due_at = None
+                if classification and state["lead_type"] and float(state["classification_confidence"] or 0) >= float(
+                    self.environment.get("HERMES_CLASSIFICATION_MIN_CONFIDENCE", "0.65")
+                ):
+                    due = self.now() + timedelta(days=self._interval_days(
+                        state["lead_type"], state["lead_id"], int(state["follow_up_count"])
+                    ))
+                    for date in (semantic.get("resume_at"), _crm_next_follow_up_at(record), state["next_action_at"]):
+                        if date:
+                            try:
+                                due = max(due, parse_timestamp(date))
+                            except (ValueError, TypeError):
+                                pass
+                    due_at = isoformat(due)
+                    connection.execute(
+                        "UPDATE secondary_lead_state SET status = 'scheduled', "
+                        "next_action_at = ?, classification_due_at = NULL, last_error = NULL, updated_at = ? "
+                        "WHERE lead_id = ?",
+                        (due_at, now_text, state["lead_id"]),
+                    )
+                connection.execute(
+                    "UPDATE notes_follow_up_state SET status = 'skipped', updated_at = ? "
+                    "WHERE latest_note_id = ?",
+                    (now_text, note["latest_note_id"]),
+                )
+                self._event(connection, state["lead_id"], "notes_follow_up_resumed", {
+                    "latest_note_id": note["latest_note_id"], "next_action_at": due_at,
+                    "status": "scheduled" if due_at else state["status"],
+                })
+                resumed += 1
+        return resumed
+
     def _notes_waiting_customer(self, lead_id: str) -> bool:
         with self._connect() as connection:
             return connection.execute(
@@ -987,10 +1085,6 @@ class SecondaryLeadScheduler:
             status = "paused"
             next_action_at = None
             pause_reason = "CRM contains DO_NOT_CONTACT"
-        elif follow_up_timing_required and follow_up_at is None:
-            status = "needs_review"
-            next_action_at = None
-            pause_reason = SALES_FOLLOW_UP_TIME_UNVERIFIED
         elif confidence < threshold:
             status = "needs_review"
             next_action_at = None
@@ -1000,6 +1094,20 @@ class SecondaryLeadScheduler:
             next_action_at = follow_up_at or isoformat(
                 self.now() + timedelta(days=follow_up_days)
             )
+            if waiting_customer:
+                with self._connect() as connection:
+                    deferred_notes = connection.execute(
+                        "SELECT analysis_json FROM notes_follow_up_state "
+                        "WHERE lead_id = ? AND status = 'skipped'",
+                        (lead_id,),
+                    ).fetchall()
+                for note in deferred_notes:
+                    resume_at = (self._json_value(note["analysis_json"], {}).get("semantic") or {}).get("resume_at")
+                    if resume_at:
+                        try:
+                            next_action_at = isoformat(max(parse_timestamp(next_action_at), parse_timestamp(resume_at)))
+                        except (ValueError, TypeError):
+                            pass
             pause_reason = None
         classification_id = str(
             uuid.uuid5(
@@ -1080,6 +1188,7 @@ class SecondaryLeadScheduler:
                     status = ?,
                     classification_due_at = NULL,
                     next_action_at = ?,
+                    generation_retry_at = NULL,
                     latest_analysis_job_id = NULL,
                     last_classified_at = ?,
                     last_error = ?,
@@ -1298,6 +1407,7 @@ class SecondaryLeadScheduler:
                 SET lead_type = ?,
                     status = 'scheduled',
                     next_action_at = ?,
+                    generation_retry_at = NULL,
                     last_error = NULL,
                     updated_at = ?
                 WHERE lead_id = ?
@@ -1340,7 +1450,7 @@ class SecondaryLeadScheduler:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT status FROM secondary_lead_state WHERE lead_id = ?",
+                "SELECT status,next_action_at FROM secondary_lead_state WHERE lead_id = ?",
                 (lead_id,),
             ).fetchone()
             if row is None:
@@ -1351,7 +1461,8 @@ class SecondaryLeadScheduler:
                 """
                 UPDATE secondary_lead_state
                 SET status = 'scheduled',
-                    next_action_at = ?,
+                    next_action_at = COALESCE(next_action_at, ?),
+                    generation_retry_at = NULL,
                     last_error = NULL,
                     updated_at = ?
                 WHERE lead_id = ?
@@ -1366,14 +1477,14 @@ class SecondaryLeadScheduler:
                     "previous_status": row["status"],
                     "actor": actor,
                     "note": note,
-                    "next_action_at": now_text,
+                    "next_action_at": row["next_action_at"] or now_text,
                 },
             )
         self._notify_scheduler()
         return {
             "lead_id": lead_id,
             "status": "scheduled",
-            "next_action_at": now_text,
+            "next_action_at": row["next_action_at"] or now_text,
         }
 
     def _export_current_record(self, lead_id: str) -> Optional[Dict[str, Any]]:
@@ -1385,40 +1496,31 @@ class SecondaryLeadScheduler:
         return records[0] if records else None
 
     def _claim_due_action(self) -> Optional[sqlite3.Row]:
-        now_text = isoformat(self.now())
+        now = self.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
+            rows = connection.execute(
                 """
-                SELECT *
-                FROM secondary_lead_state
-                WHERE status = 'scheduled'
-                  AND next_action_at <= ?
+                SELECT * FROM secondary_lead_state
+                WHERE status = 'scheduled' AND next_action_at <= ?
+                  AND (generation_retry_at IS NULL OR generation_retry_at <= ?)
                   AND NOT EXISTS (
-                    SELECT 1
-                    FROM notes_follow_up_state notes
+                    SELECT 1 FROM notes_follow_up_state notes
                     WHERE notes.lead_id = secondary_lead_state.lead_id
                       AND notes.status NOT IN ('superseded', 'skipped')
                   )
                 ORDER BY next_action_at, lead_id
-                LIMIT 1
                 """,
-                (now_text,),
-            ).fetchone()
+                (isoformat(now + timedelta(days=7)), isoformat(now)),
+            ).fetchall()
+            row = next((row for row in rows if draft_at(row) <= now), None)
             if row is None:
                 return None
             connection.execute(
-                """
-                UPDATE secondary_lead_state
-                SET status = 'generating', updated_at = ?
-                WHERE lead_id = ? AND status = 'scheduled'
-                """,
-                (now_text, row["lead_id"]),
+                "UPDATE secondary_lead_state SET status='generating', updated_at=? WHERE lead_id=?",
+                (isoformat(now), row["lead_id"]),
             )
-            return connection.execute(
-                "SELECT * FROM secondary_lead_state WHERE lead_id = ?",
-                (row["lead_id"],),
-            ).fetchone()
+            return connection.execute("SELECT * FROM secondary_lead_state WHERE lead_id=?", (row["lead_id"],)).fetchone()
 
     def _classification_context(
         self,
@@ -1443,12 +1545,43 @@ class SecondaryLeadScheduler:
         classification = self._classification_context(row)
         record = prepare_message_record(source_record, classification)
         if self._notes_waiting_customer(row["lead_id"]):
-            record["message_route"] = "conversation_follow_up"
+            if record["message_route"] not in {"recommender_thanks", "referral_handoff", "referral_review"} and row["lead_type"] != "below_moq":
+                record["message_route"] = "conversation_follow_up"
             record["sales_follow_up_context"] = {
                 "status": "sales_replied",
                 "evidence_quote": None,
                 "source": "crm.note.direction",
             }
+            with self._connect() as connection:
+                note_state = connection.execute(
+                    "SELECT * FROM notes_follow_up_state WHERE lead_id = ? "
+                    "AND status = 'skipped' ORDER BY source_created_at DESC LIMIT 1",
+                    (row["lead_id"],),
+                ).fetchone()
+            notes_record = self._json_value(note_state["crm_snapshot_json"], {})
+            if notes_record.get("notes"):
+                history = notes_core.recent_email_history(notes_record)
+                record["conversation_history"] = history
+                record["review_context"]["crm_email_history"] = history
+                record.setdefault("source_version", {})["notes_source_hash"] = note_state["source_hash"]
+                latest = notes_core.structural_state(notes_record["notes"]).get("latest")
+                if latest and not latest.get("transport_event"):
+                    channel = outbound_channel(record, latest)
+                    contact_key = "linkedin_url" if channel == "linkedin" else "email"
+                    recipient = notes_record.get("contact_linkedin_url" if channel == "linkedin" else "contact_email")
+                    recipient = recipient or (record.get("contact") or {}).get(contact_key)
+                    if not source_channel((record.get("lead") or {}).get("source")) and not (valid_linkedin(recipient) if channel == "linkedin" else valid_email(recipient)):
+                        raise RuntimeError("Current Notes conversation has no valid recipient for its channel")
+                    record.setdefault("contact", {})[contact_key] = recipient
+                    record.setdefault("output", {})["type"] = channel
+                    record["output"]["default_language"] = "Customer language"
+                    record["review_context"]["crm_email_evidence"] = notes_core._email_evidence(latest, latest["body"])
+                    outbound = [item for item in history if item["direction"] == "FA" and not item.get("transport_event")]
+                    if outbound:
+                        record["sales_follow_up_context"] = {
+                            "status": "sales_replied", "evidence_quote": outbound[-1]["body"],
+                            "source": notes_core._source_for_channel(channel),
+                        }
         lead = record.setdefault("lead", {})
         lead_type = row["lead_type"]
         if lead_type == "no_current_demand":
@@ -1461,6 +1594,12 @@ class SecondaryLeadScheduler:
         lead["classification_source"] = "local.secondary_lead_state"
         lead["next_eligible_follow_up_at"] = row["next_action_at"]
         lead["successful_outbound_count"] = int(row["follow_up_count"])
+        record["review_schedule"] = {
+            "follow_up_at": row["next_action_at"],
+            "draft_at": isoformat(draft_at(row)),
+            "advance_days": review_lead_days(row["lead_type"], row["lead_id"], int(row["follow_up_count"])),
+            "crm_source_hash": row["source_hash"],
+        }
         record["secondary_lead_schedule"] = {
             "lead_type": lead_type,
             "lead_type_label": LEAD_TYPE_LABELS[lead_type],
@@ -1468,6 +1607,8 @@ class SecondaryLeadScheduler:
             "next_action_at": row["next_action_at"],
             "follow_up_count": int(row["follow_up_count"]),
             "timing_verified": True,
+            "generation_ready": True,
+            "delivery_due": parse_timestamp(row["next_action_at"]) <= self.now(),
         }
         return record
 
@@ -1477,9 +1618,11 @@ class SecondaryLeadScheduler:
         record: Dict[str, Any],
     ) -> str:
         generation_key = (
-            f"{row['lead_id']}:{row['source_hash']}:{row['next_action_at']}:"
-            f"{row['follow_up_count']}"
+            f"review-window-v1:{row['lead_id']}:{row['source_hash']}:{row['next_action_at']}:"
+            f"{row['follow_up_count']}:{row['last_classified_at']}"
         )
+        if record.get("conversation_history"):
+            generation_key += f":notes:{record['source_version']['notes_source_hash']}"
         job_id = str(
             uuid.uuid5(
                 uuid.NAMESPACE_URL,
@@ -1566,6 +1709,119 @@ class SecondaryLeadScheduler:
                 (job_id,),
             ).fetchone()
 
+    def _handoff_recommender(self, row: sqlite3.Row) -> Dict[str, Any]:
+        record = self._json_value(row["crm_snapshot_json"], {})
+        context = referral_context(record, self._classification_context(row)) or {}
+        targets = context.get("referred_contacts") or context.get("related_contacts") or []
+        reject_pending_messages_for_lead(row["lead_id"], "referral-handoff",
+            "推荐人不发信，转入被推荐联系人自己的队列并核对 Notes。", signal_event="superseded")
+        results = []
+        for target in targets:
+            target_id = target.get("id")
+            if not target_id or str(target_id) == row["lead_id"]:
+                results.append({"name": target.get("name"), "status": "needs_contact_identity"})
+                continue
+            current = self._export_current_record(str(target_id))
+            if current is None:
+                results.append({"lead_id": str(target_id), "status": "outside_secondary_scope"})
+                continue
+            target_context = referral_context(current) or {}
+            if not any(str(person.get("id")) == row["lead_id"] for person in target_context.get("recommended_by", [])):
+                results.append({"lead_id": str(target_id), "status": "relationship_changed"})
+                continue
+            self._upsert_discovered(current)
+            _, history = read_referral_history(str(target_id))
+            with self._connect() as connection:
+                state = connection.execute("SELECT status,next_action_at FROM secondary_lead_state WHERE lead_id=?", (str(target_id),)).fetchone()
+            results.append({"lead_id": str(target_id), "status": state["status"],
+                            "next_action_at": state["next_action_at"], "notes_check": history})
+        with self._connect() as connection:
+            connection.execute("UPDATE secondary_lead_state SET status='paused', next_action_at=NULL, classification_due_at=NULL, latest_message_version_id=NULL, last_error=?, updated_at=? WHERE lead_id=?",
+                ("REFERRAL_HANDOFF: 推荐人不发信；被推荐人按自己的 Notes、待审消息和排期处理。" if results and all(item.get("status") not in {"needs_contact_identity", "relationship_changed"} for item in results) else "REFERRAL_HANDOFF: 推荐人不发信；关联联系人身份待人工核对。", isoformat(self.now()), row["lead_id"]))
+            self._event(connection, row["lead_id"], "referral_handoff", {"targets": results})
+        return {"lead_id": row["lead_id"], "status": "paused", "decision": "referral_handoff", "targets": results}
+
+    def _route_referrals(self) -> List[Dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM secondary_lead_state WHERE status!='converted'").fetchall()
+        outcomes = []
+        for row in rows:
+            if row["status"] == "paused" and str(row["last_error"] or "").startswith("REFERRAL_HANDOFF:"):
+                continue
+            record = self._json_value(row["crm_snapshot_json"], {})
+            if is_recommender(record, self._classification_context(row)):
+                outcomes.append(self._handoff_recommender(row))
+        return outcomes
+
+    def _check_referral_history(self, row: sqlite3.Row, message_input: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        notes_record, check = read_referral_history(row["lead_id"])
+        referred = (referral_context(message_input) or {}).get("current_contact_role") == "referred"
+        message_input.setdefault("review_schedule", {})["notes_source_hash"] = check["source_hash"]
+        if referred:
+            message_input["referral_history_check"] = check
+        if notes_record is None and not referred:
+            if message_input.get("conversation_history"):
+                raise RuntimeError("此前 Notes 会话已消失，需核对后再生成")
+            return None
+        if notes_record is None:
+            # No Notes and no other recorded send evidence: first contact is allowed.
+            if int(row["follow_up_count"]):
+                status, reason = "needs_review", "被推荐人有系统发送记录但 Notes 缺失，需核对历史后再生成，避免重复首次联系"
+            else:
+                message_input["message_route"] = "referred_intro"
+                message_input["sales_follow_up_context"] = {"status": "none", "evidence_quote": None, "source": "recipient.notes_check"}
+                return None
+        else:
+            history = notes_core.recent_email_history(notes_record)
+            message_input["conversation_history"] = history
+            message_input["review_context"]["crm_email_history"] = history
+            message_input.setdefault("source_version", {})["notes_source_hash"] = check["source_hash"]
+            state = notes_core.structural_state(notes_record["notes"])
+            note_id = self.notes_processor._discover(notes_record, state)
+            with self._connect() as connection:
+                cached = connection.execute("SELECT * FROM notes_follow_up_state WHERE latest_note_id=?", (note_id,)).fetchone()
+            if state["state"] == "needs_analysis" and not (cached and cached["status"] == "skipped"):
+                with self._connect() as connection:
+                    self._set_state(connection, "next_notes_scan_at", isoformat(self.now()))
+                status, reason = "scheduled", "被推荐人已有客户回复，先由 Notes 会话流程处理"
+            elif state["state"] == "manual_review":
+                status, reason = "needs_review", "被推荐人的 Notes 日期或方向不明确，需核对，不能重复首次联系"
+            else:
+                outbound = [note for note in notes_record["notes"] if note.get("direction") == "FA" and not note.get("transport_event")]
+                dated = [note for note in outbound if note.get("email_at")]
+                if not dated:
+                    status, reason = "needs_review", "被推荐人已有会话，缺少可确认的发信日期，需核对后跟进"
+                else:
+                    latest = max(dated, key=lambda note: note["email_at"])
+                    due = parse_timestamp(latest["email_at"]) + timedelta(days=self._interval_days(row["lead_type"], row["lead_id"], int(row["follow_up_count"])))
+                    explicit = _crm_next_follow_up_at(self._json_value(row["crm_snapshot_json"], {}))
+                    if explicit:
+                        due = max(due, parse_timestamp(explicit))
+                    due = max(due, parse_timestamp(row["next_action_at"]))
+                    ahead = review_lead_days(row["lead_type"], row["lead_id"], int(row["follow_up_count"]))
+                    outside_window = due - timedelta(days=ahead) > self.now()
+                    with self._connect() as connection:
+                        connection.execute("UPDATE secondary_lead_state SET status=?, next_action_at=?, last_error=NULL WHERE lead_id=?", ("scheduled" if outside_window else "generating", isoformat(due), row["lead_id"]))
+                    if outside_window:
+                        return {"lead_id": row["lead_id"], "status": "scheduled", "decision": "waiting_existing_followup", "next_action_at": isoformat(due)}
+                    message_input.setdefault("review_schedule", {}).update({"follow_up_at": isoformat(due), "draft_at": isoformat(due - timedelta(days=ahead))})
+                    message_input.setdefault("secondary_lead_schedule", {}).update({"next_action_at": isoformat(due), "delivery_due": due <= self.now(), "generation_ready": True})
+                    message_input.setdefault("lead", {})["next_eligible_follow_up_at"] = isoformat(due)
+                    message_input["message_route"] = "conversation_follow_up"
+                    message_input["sales_follow_up_context"] = {"status": "sales_replied", "evidence_quote": latest["body"], "source": notes_core._source_for_channel(latest.get("channel", "email"))}
+                    channel = outbound_channel(message_input, latest)
+                    key = "linkedin_url" if channel == "linkedin" else "email"
+                    recipient = notes_record.get("contact_linkedin_url" if channel == "linkedin" else "contact_email")
+                    if recipient:
+                        message_input["contact"][key] = recipient
+                    message_input["output"] = {"type": channel, "default_language": "Customer language"}
+                    return None
+        with self._connect() as connection:
+            connection.execute("UPDATE secondary_lead_state SET status=?, next_action_at=?, last_error=? WHERE lead_id=?",
+                (status, row["next_action_at"] if status == "scheduled" else None, reason, row["lead_id"]))
+            self._event(connection, row["lead_id"], "referral_history_deferred", {"reason": reason})
+        return {"lead_id": row["lead_id"], "status": status, "decision": "notes_history_deferred"}
+
     def _dispatch_one(self, row: sqlite3.Row) -> Dict[str, Any]:
         lead_id = row["lead_id"]
         current = self._export_current_record(lead_id)
@@ -1584,6 +1840,22 @@ class SecondaryLeadScheduler:
             ).fetchone()
 
         message_input = self._message_input(row)
+        if is_recommender(message_input):
+            return self._handoff_recommender(row)
+        forced = source_channel((message_input.get("lead") or {}).get("source"))
+        if forced:
+            contact = message_input.get("contact") or {}
+            valid = valid_linkedin(contact.get("linkedin_url")) if forced == "linkedin" else valid_email(contact.get("email"))
+            if not valid:
+                reason = "CRM 来源指定领英渠道，缺少有效领英地址" if forced == "linkedin" else "CRM 来源指定邮箱渠道，缺少有效邮箱"
+                with self._connect() as connection:
+                    connection.execute("UPDATE secondary_lead_state SET status='needs_contact', last_error=?, generation_retry_at=NULL WHERE lead_id=?", (reason, lead_id))
+                return {"lead_id": lead_id, "status": "needs_contact", "reason": reason}
+        deferred = self._check_referral_history(row, message_input)
+        if deferred:
+            return deferred
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM secondary_lead_state WHERE lead_id=?", (lead_id,)).fetchone()
         job_id = self._enqueue_message(row, message_input)
         process_result = self.message_processor.process_job(job_id)
         analysis = self._analysis_result(job_id)
@@ -1600,7 +1872,7 @@ class SecondaryLeadScheduler:
                     """
                     UPDATE secondary_lead_state
                     SET status = ?,
-                        next_action_at = ?,
+                        generation_retry_at = ?,
                         last_error = ?,
                         updated_at = ?
                     WHERE lead_id = ?
@@ -1616,13 +1888,15 @@ class SecondaryLeadScheduler:
             return {
                 "lead_id": lead_id,
                 "status": status,
-                "next_action_at": retry_at,
+                "next_action_at": row["next_action_at"],
+                "retry_at": retry_at,
                 "pipeline": process_result,
             }
 
         output = json.loads(analysis["result_json"])
         decision = analysis["decision"]
         now_text = isoformat(self.now())
+        next_action_at = row["next_action_at"] if decision == "generated" else None
         if decision == "generated":
             channel = analysis["output_type"]
             contact = message_input.get("contact") or {}
@@ -1654,7 +1928,21 @@ class SecondaryLeadScheduler:
                 error = "Generated message has no valid Outbox recipient"
         elif decision == "no_message":
             message_version_id = None
-            status = "paused"
+            permitted_follow_up = (
+                (message_input.get("message_route") == "conversation_follow_up" or (
+                    message_input.get("message_route") in {"recommender_thanks", "referred_intro"}
+                    and (message_input.get("sales_follow_up_context") or {}).get("status") in {"sales_replied", "information_sent"}
+                ))
+                and (message_input.get("contact_permission") or {}).get("status") == "allowed"
+                and "DO_NOT_CONTACT" not in (
+                    (message_input.get("warnings") or []) + (output.get("warnings") or [])
+                )
+            )
+            status = "scheduled" if permitted_follow_up else "paused"
+            if permitted_follow_up:
+                next_action_at = isoformat(max(self.now(), parse_timestamp(row["next_action_at"])) + timedelta(days=self._interval_days(
+                    row["lead_type"], lead_id, int(row["follow_up_count"])
+                )))
             error = output.get("reason") or "Hermes decided not to generate a message"
         else:
             message_version_id = None
@@ -1666,7 +1954,8 @@ class SecondaryLeadScheduler:
                 """
                 UPDATE secondary_lead_state
                 SET status = ?,
-                    next_action_at = NULL,
+                    next_action_at = ?,
+                    generation_retry_at = ?,
                     latest_message_version_id = ?,
                     latest_run_id = ?,
                     last_generated_at = ?,
@@ -1676,6 +1965,8 @@ class SecondaryLeadScheduler:
                 """,
                 (
                     status,
+                    next_action_at,
+                    next_action_at if decision == "no_message" and status == "scheduled" else None,
                     message_version_id,
                     analysis["run_id"],
                     now_text,
@@ -1691,6 +1982,7 @@ class SecondaryLeadScheduler:
                 {
                     "decision": decision,
                     "status": status,
+                    "next_action_at": next_action_at,
                     "analysis_job_id": job_id,
                     "message_version_id": message_version_id,
                 },
@@ -1706,13 +1998,14 @@ class SecondaryLeadScheduler:
     def dispatch_due(self, limit: int = 20) -> List[Dict[str, Any]]:
         if limit < 1 or limit > 500:
             raise RuntimeError("Dispatch limit must be between 1 and 500")
-        results = []
-        for _ in range(limit):
+        workers = _validated_int(self.environment, "HERMES_MESSAGE_WORKERS", 1, 1, 4)
+
+        def dispatch_one(_index: int) -> Optional[Dict[str, Any]]:
             row = self._claim_due_action()
             if row is None:
-                break
+                return None
             try:
-                results.append(self._dispatch_one(row))
+                return self._dispatch_one(row)
             except Exception as exc:
                 retry_at = isoformat(self.now() + timedelta(minutes=20))
                 with self._connect() as connection:
@@ -1721,7 +2014,7 @@ class SecondaryLeadScheduler:
                         """
                         UPDATE secondary_lead_state
                         SET status = 'scheduled',
-                            next_action_at = ?,
+                            generation_retry_at = ?,
                             last_error = ?,
                             updated_at = ?
                         WHERE lead_id = ?
@@ -1739,15 +2032,15 @@ class SecondaryLeadScheduler:
                         "message_generation_failed",
                         {"retry_at": retry_at, "error": str(exc)[-1000:]},
                     )
-                results.append(
-                    {
-                        "lead_id": row["lead_id"],
-                        "status": "retry_wait",
-                        "retry_at": retry_at,
-                        "error": str(exc)[-1000:],
-                    }
-                )
-        return results
+                return {
+                    "lead_id": row["lead_id"],
+                    "status": "retry_wait",
+                    "retry_at": retry_at,
+                    "error": str(exc)[-1000:],
+                }
+
+        with ThreadPoolExecutor(max_workers=min(workers, limit)) as executor:
+            return [result for result in executor.map(dispatch_one, range(limit)) if result is not None]
 
     def handle_outbox_signal(
         self,
@@ -1755,8 +2048,10 @@ class SecondaryLeadScheduler:
         event: str,
         event_at: Optional[datetime] = None,
     ) -> bool:
-        if event not in {"approved", "sent", "rejected"}:
-            raise RuntimeError("Outbox signal must be approved, sent, or rejected")
+        if event not in {"approved", "sent", "rejected", "superseded", "review_invalidated"}:
+            raise RuntimeError(
+                "Outbox signal must be approved, sent, rejected, or superseded"
+            )
         occurred = (event_at or self.now()).astimezone(timezone.utc)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1770,12 +2065,16 @@ class SecondaryLeadScheduler:
             ).fetchone()
             if row is None:
                 return False
-            if event == "approved":
-                status = "waiting_delivery"
-                next_action_at = None
+            if event in {"approved", "review_invalidated"}:
+                status = "waiting_delivery" if event == "approved" else "waiting_review"
+                next_action_at = row["next_action_at"]
                 follow_up_count = int(row["follow_up_count"])
             elif event == "rejected":
                 status = "needs_review"
+                next_action_at = None
+                follow_up_count = int(row["follow_up_count"])
+            elif event == "superseded":
+                status = "settling"
                 next_action_at = None
                 follow_up_count = int(row["follow_up_count"])
             else:
@@ -1792,6 +2091,8 @@ class SecondaryLeadScheduler:
                 UPDATE secondary_lead_state
                 SET status = ?,
                     next_action_at = ?,
+                    generation_retry_at = NULL,
+                    classification_due_at = CASE WHEN ? THEN ? ELSE classification_due_at END,
                     follow_up_count = ?,
                     latest_message_version_id = CASE WHEN ? THEN NULL ELSE latest_message_version_id END,
                     last_generated_at = CASE WHEN ? THEN NULL ELSE last_generated_at END,
@@ -1802,9 +2103,11 @@ class SecondaryLeadScheduler:
                 (
                     status,
                     next_action_at,
+                    event == "superseded",
+                    isoformat(occurred),
                     follow_up_count,
-                    event == "rejected",
-                    event == "rejected",
+                    event in {"rejected", "superseded"},
+                    event in {"rejected", "superseded"},
                     isoformat(occurred),
                     row["lead_id"],
                 ),
@@ -2114,6 +2417,9 @@ class SecondaryLeadScheduler:
                                 + timedelta(minutes=notes_interval_minutes)
                             ),
                         )
+            if mode == "online":
+                self._route_referrals()
+            self._resume_notes_follow_ups()
             classification_batch_size = _validated_int(
                 self.environment,
                 "HERMES_CLASSIFICATION_BATCH_SIZE",
@@ -2121,8 +2427,8 @@ class SecondaryLeadScheduler:
                 1,
                 500,
             )
-            classifications = self.classify_due(classification_batch_size)
             dispatched = self.dispatch_due() if mode == "online" else []
+            classifications = self.classify_due(classification_batch_size)
             result = {
                 "status": "ok",
                 "mode": mode,
@@ -2203,9 +2509,9 @@ class SecondaryLeadScheduler:
                         parse_timestamp(resume_at),
                     )
                 candidates.append(classification_at)
-            action_row = connection.execute(
+            action_rows = connection.execute(
                 """
-                SELECT min(next_action_at) AS due_at
+                SELECT *
                 FROM secondary_lead_state
                 WHERE status = 'scheduled'
                   AND next_action_at IS NOT NULL
@@ -2216,9 +2522,9 @@ class SecondaryLeadScheduler:
                       AND notes.status NOT IN ('superseded', 'skipped')
                   )
                 """
-            ).fetchone()
-            if action_row and action_row["due_at"]:
-                action_at = parse_timestamp(action_row["due_at"])
+            ).fetchall()
+            for action_row in action_rows:
+                action_at = draft_at(action_row)
                 if remote_retry_at:
                     action_at = max(action_at, remote_retry_at)
                 candidates.append(action_at)
@@ -2739,7 +3045,10 @@ def main(argv=None) -> int:
         help="Apply an Outbox lifecycle signal",
     )
     signal_parser.add_argument("message_version_id")
-    signal_parser.add_argument("event", choices=("approved", "sent", "rejected"))
+    signal_parser.add_argument(
+        "event",
+        choices=("approved", "sent", "rejected", "superseded"),
+    )
     args = parser.parse_args(argv)
 
     scheduler = SecondaryLeadScheduler(

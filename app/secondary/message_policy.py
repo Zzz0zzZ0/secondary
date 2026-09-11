@@ -2,6 +2,8 @@ import copy
 from typing import Any, Dict, List, Optional
 
 from .sender_identity import resolve_sender_identity
+from .channels import source_channel
+from .referrals import crm_referral_context, is_recommender
 
 
 MANUAL_CONFIRMATION_WARNING = "CRM_EVIDENCE_REQUIRES_MANUAL_CONFIRMATION"
@@ -13,6 +15,7 @@ COMPANY_CONTEXT_WARNINGS = {
 MESSAGE_ROUTES = {
     "email_reply",
     "recommender_thanks",
+    "referral_handoff",
     "referred_intro",
     "qualification",
     "conversation_follow_up",
@@ -36,7 +39,7 @@ def message_route(
         item in {"RECOMMEND", "RECOMMENDED", "（被）推荐"}
         for item in raw_types
     )
-    relationship = (
+    relationship = crm_referral_context(source_record) or (
         classification.get("referral_relationship")
         if isinstance(classification, dict)
         else source_record.get("referral_context")
@@ -46,6 +49,8 @@ def message_route(
         if isinstance(classification, dict)
         else source_record.get("sales_follow_up_context")
     )
+    if is_recommender(source_record, classification):
+        return "referral_handoff"
     notes_evidence = (source_record.get("review_context") or {}).get(
         "crm_email_evidence"
     )
@@ -58,18 +63,19 @@ def message_route(
         return "email_reply"
     if lead_type == "below_moq" or "SMALL_QUANTITY" in raw_types:
         return "default"
+    role = relationship.get("current_contact_role") if isinstance(relationship, dict) else None
+    if referred or role:
+        if role == "recommender":
+            return "referral_handoff"
+        if role != "referred":
+            return "referral_review"
     if (
         isinstance(follow_up, dict)
         and follow_up.get("status") in {"sales_replied", "information_sent"}
     ):
         return "conversation_follow_up"
-    if referred:
-        role = relationship.get("current_contact_role") if isinstance(relationship, dict) else None
-        if role == "recommender":
-            return "recommender_thanks"
-        if role == "referred":
-            return "referred_intro"
-        return "referral_review"
+    if role == "referred":
+        return "referred_intro"
     if lead_type == "no_current_demand":
         return "default"
     return "qualification"
@@ -130,6 +136,9 @@ def prepare_message_record(
 ) -> Dict[str, Any]:
     record = copy.deepcopy(source_record)
     lead = record.setdefault("lead", {})
+    forced = source_channel(lead.get("source"))
+    if forced:
+        record.setdefault("output", {})["type"] = forced
     internal_note = lead.pop("internal_note", None)
     record["review_context"] = {
         "crm_internal_note": internal_note,
@@ -211,6 +220,14 @@ def prepare_message_record(
                     "source": "legacy.classification.recommended_by",
                 }
 
+    structured_referral = crm_referral_context(source_record)
+    if structured_referral:
+        record["referral_context"] = structured_referral
+        for key in ("recommended_by", "referred_contacts"):
+            lead.pop(key, None)
+            if structured_referral[key]:
+                lead[key] = " and ".join(person["name"] for person in structured_referral[key])
+
     eligibility = generation_eligibility(source_record, classification)
     record["message_generation_eligibility"] = eligibility
     if eligibility["requires_manual_confirmation"]:
@@ -263,6 +280,9 @@ def validation_errors(
         errors.append("decision取值不合法")
     if output_type not in {"email", "linkedin"}:
         errors.append("output_type取值不合法")
+    forced = source_channel((crm_input.get("lead") or {}).get("source"))
+    if forced and output_type != forced:
+        errors.append("输出渠道与CRM来源指定渠道不一致")
     if output_type != (crm_input.get("output") or {}).get("type"):
         errors.append("输出渠道与CRM任务不一致")
     if not isinstance(content, dict):
@@ -332,6 +352,8 @@ def validation_errors(
             or content.get("subject_zh") is not None
         ):
             errors.append("LinkedIn消息不应包含主题")
+        if is_recommender(crm_input) or route == "referral_handoff":
+            errors.append("推荐人不生成客户消息，应检查被推荐人的 Notes 后转入其独立队列")
         if route == "referral_review":
             errors.append("推荐关系未确认时不得生成客户消息")
         if route == "conversation_follow_up":

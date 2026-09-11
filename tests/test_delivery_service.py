@@ -85,7 +85,7 @@ class DeliveryStateTest(unittest.TestCase):
                 {"lead_id": "lead-1"},
                 "idempotency-1",
                 1,
-            )],
+            ), ("lead-1", {})],
             fetchall_results=[[]],
         )
 

@@ -123,7 +123,7 @@ class SecondaryReferralTest(unittest.TestCase):
         )
         self.assertEqual(prepared["lead"]["referred_contacts"], "Florian Laux")
         self.assertNotIn("recommended_by", prepared["lead"])
-        self.assertEqual(prepared["message_route"], "recommender_thanks")
+        self.assertEqual(prepared["message_route"], "referral_handoff")
 
     def test_recommender_normalizes_legacy_recommended_by(self):
         note = "Mario Vicari 告知同事 Lucchi 会负责跟进。"
@@ -260,7 +260,7 @@ class SecondaryReferralTest(unittest.TestCase):
         )
         self.assertEqual(prepared["message_route"], "referral_review")
 
-    def test_recommender_meaning_is_not_inferred_from_question_words(self):
+    def test_recommender_message_is_blocked_regardless_of_wording(self):
         crm_input = {
             "lead": {"id": "lead-1"},
             "output": {"type": "linkedin"},
@@ -282,7 +282,7 @@ class SecondaryReferralTest(unittest.TestCase):
             "reason": "感谢推荐并避免询问产品需求。",
             "review_required": True,
         }
-        self.assertEqual(validation_errors(candidate, crm_input, "lead-1"), [])
+        self.assertIn("推荐人不生成客户消息，应检查被推荐人的 Notes 后转入其独立队列", validation_errors(candidate, crm_input, "lead-1"))
 
     def test_follow_up_meaning_is_not_inferred_from_phrase_blacklists(self):
         crm_input = {

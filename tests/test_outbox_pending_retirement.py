@@ -111,11 +111,15 @@ class PendingMessageRetirementTest(unittest.TestCase):
                     "Superseded by current CRM Notes.",
                     keep_note_id="note-current",
                     keep_email_at="2026-08-20T10:00:00+00:00",
+                    signal_event="superseded",
                 )
 
         self.assertEqual(["pending-1"], retired)
         self.assertEqual("pending_review", self.cursor.records[1]["status"])
-        self.assertEqual([("pending-1", "rejected")], [call.args for call in notify.call_args_list])
+        self.assertEqual(
+            [("pending-1", "superseded")],
+            [call.args for call in notify.call_args_list],
+        )
 
 
 if __name__ == "__main__":

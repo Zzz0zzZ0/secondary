@@ -16,12 +16,20 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     crm_input = json.loads(args.input.read_text(encoding="utf-8"))
+    raw = args.raw.read_text(encoding="utf-8")
     try:
-        candidate, _, _ = parse_json_object(args.raw.read_text(encoding="utf-8"))
+        candidate, _, _ = parse_json_object(raw)
     except (json.JSONDecodeError, RuntimeError) as exc:
+        error = f"Hermes返回内容不是有效JSON：{exc}"
+        if raw.lstrip().startswith("API call failed"):
+            error = (
+                "Hermes provider quota exceeded (HTTP 429 / 2056)"
+                if "2056" in raw or "用量上限" in raw
+                else "Hermes provider request failed; no model output was returned"
+            )
         args.errors.write_text(
             json.dumps(
-                [f"Hermes返回内容不是有效JSON：{exc}"],
+                [error],
                 ensure_ascii=False,
                 indent=2,
             )

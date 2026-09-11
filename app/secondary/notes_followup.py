@@ -12,6 +12,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
+from app.secondary.referrals import is_recommender
 from notes_trial import notes_trial as notes_core
 
 
@@ -89,6 +90,7 @@ def retire_stale_reviews(
             "Superseded because current CRM Notes own this conversation.",
             keep_note_id=latest_note_id if keep_message else None,
             keep_email_at=email_at if keep_message else None,
+            signal_event="superseded",
         )
     ]
     action_ids = dismiss_pending_actions_for_lead(
@@ -228,6 +230,7 @@ class NotesFollowUpProcessor:
         )
         semantic_record = dict(record)
         semantic_record.pop("sales_name", None)
+        semantic_record.pop("lead_source", None)  # Routing metadata does not change the customer message.
         source_hash = hashlib.sha256(
             _canonical(
                 {
@@ -397,6 +400,17 @@ class NotesFollowUpProcessor:
             return "unchanged", None, False, False
         hermes_called = False
         try:
+            with self.connect() as connection:
+                classified = connection.execute(
+                    "SELECT c.result_json FROM secondary_lead_state s JOIN secondary_lead_classification c ON c.lead_id=s.lead_id AND c.source_hash=s.source_hash WHERE s.lead_id=?",
+                    (str(record["lead_id"]),),
+                ).fetchone()
+            classification = json.loads(classified["result_json"]) if classified else None
+            if is_recommender(record, classification):
+                analysis = {"semantic": {"decision": "no_action", "contact_permission": "allowed", "reason": "推荐人不发信，使用被推荐人独立队列并核对其 Notes"}, "draft": None}
+                with self.connect() as connection:
+                    connection.execute("UPDATE notes_follow_up_state SET status='completed', decision='no_action', analysis_json=?, publication_type=NULL, publication_id=NULL, next_attempt_at=NULL, last_error=NULL WHERE latest_note_id=?", (_canonical(analysis), note_id))
+                return "no_action", None, False, False
             source_note = self._source_note(record, state)
             expected_email_at = (
                 str(source_note.get("email_at"))
@@ -428,12 +442,24 @@ class NotesFollowUpProcessor:
                         str(record["lead_id"]), existing["id"]
                     )
                 return "existing_review", existing["type"], False, False
+            channel = notes_core.outbound_channel(record, source_note)
+            if channel == "linkedin":
+                contact_valid = notes_core._valid_linkedin(
+                    record.get("contact_linkedin_url")
+                )
+                channel_label = "LinkedIn地址"
+            else:
+                contact_valid = notes_core._valid_email(record.get("contact_email"))
+                channel_label = "邮箱"
             if state["state"] == "manual_review":
                 analysis = self._manual_review_analysis(record, state)
-            elif not notes_core._valid_email(record.get("contact_email")):
+            elif not contact_valid:
                 analysis = self._manual_review_analysis(
                     record,
-                    {**state, "reason": "联系人邮箱不可用，无法生成客户回复"},
+                    {
+                        **state,
+                        "reason": f"联系人{channel_label}不可用，无法生成客户回复",
+                    },
                 )
             else:
                 hermes_called = True
@@ -543,11 +569,26 @@ class NotesFollowUpProcessor:
         adopted_existing = 0
         for record in records:
             state = notes_core.structural_state(record.get("notes") or [])
-            note_id = self._discover(record, state, baseline=bootstrap)
-            if note_id is None:
-                continue
+            unchanged_waiting = False
+            if state["state"] in {"waiting_customer", "needs_analysis"}:
+                with self.connect() as connection:
+                    previous = connection.execute(
+                        "SELECT crm_snapshot_json FROM notes_follow_up_state "
+                        "WHERE lead_id = ? AND status = 'skipped'",
+                        (str(record["lead_id"]),),
+                    ).fetchone()
+                if previous is not None:
+                    old_record = json.loads(previous["crm_snapshot_json"])
+                    current_record = dict(record)
+                    for key in ("sales_name", "lead_source"):
+                        old_record.pop(key, None)
+                        current_record.pop(key, None)
+                    unchanged_waiting = old_record == current_record
             source_note = self._source_note(record, state) or {}
-            retired_stale_reviews += len(
+            if not source_note.get("note_id"):
+                continue
+            note_id = str(source_note["note_id"])
+            retired_stale_reviews += 0 if unchanged_waiting else len(
                 self.retire_stale(
                     str(record["lead_id"]),
                     note_id,
@@ -558,6 +599,8 @@ class NotesFollowUpProcessor:
                     ),
                 )
             )
+            # Persist this version only after retirement succeeds, so failures retry.
+            self._discover(record, state, baseline=bootstrap)
             current[note_id] = (record, state)
             expected_email_at = (
                 str(source_note["email_at"])

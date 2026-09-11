@@ -141,3 +141,22 @@ Return exactly one object matching
 `customer_used_sender_name` when no unambiguous customer-used sender name is
 present, and use `[]` for `recommended_by` when no recommender is fully
 grounded. Always include `referral_relationship`.
+
+### Structured CRM referral links
+
+`crm_referral.recommended_by` contains the current contact's recommender;
+`crm_referral.referred_contacts` contains contacts recommended by the current contact.
+These are resolved `person.recommendedById` links (ID, name, available contact details),
+including the reverse direction. Use these verified links before inferring direction
+from remarks. A shared company or a name match alone never establishes a link.
+When these links exist, classify as `referred` unless the explicit SMALL_QUANTITY
+rule applies. The validator supplies `referral_relationship` from the links;
+do not fabricate internal-note quotes for structural data. Return empty textual
+`recommended_by` and null `referral_relationship` when no note quote supports them.
+Self-links and deleted contacts are excluded. Both directions remain available for
+manual review if the current contact has both roles.
+
+For a referred contact, `sales_follow_up_context` must describe a verified action
+toward this exact current contact. A remark saying that we wrote to another person
+who redirected us to this contact does not prove any email was sent to the current
+contact. Do not inherit the recommender's sent/replied state.

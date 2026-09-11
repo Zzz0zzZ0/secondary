@@ -7,6 +7,51 @@ from app.secondary_scheduler import SecondaryLeadScheduler
 
 
 class MessageJobRecoveryTest(unittest.TestCase):
+    def test_reclassification_with_same_due_date_gets_a_fresh_message_job(self):
+        now = datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
+        record = {
+            "lead": {"id": "lead-1", "next_follow_up_at": now.isoformat()},
+            "source_version": {"record_id": "lead-1", "updated_at": now.isoformat()},
+        }
+        candidate = {
+            "lead_id": "lead-1", "lead_type": "unknown_demand",
+            "confidence": 0.9, "reason": "Needs qualification", "evidence": [],
+            "contact_permission": {"status": "allowed", "evidence_quote": None},
+        }
+        for previous_status in ("failed", "completed"):
+            with self.subTest(previous_status=previous_status), tempfile.TemporaryDirectory() as directory:
+                scheduler = SecondaryLeadScheduler(
+                    state_dir=Path(directory), environment={}, now=lambda: now,
+                )
+                scheduler.classification_runner.run = lambda *_: (candidate, None)
+                scheduler._upsert_discovered(record)
+
+                def state():
+                    with scheduler._connect() as connection:
+                        return connection.execute(
+                            "SELECT * FROM secondary_lead_state WHERE lead_id = 'lead-1'"
+                        ).fetchone()
+
+                scheduler._classify_one(state())
+                first_due = state()["next_action_at"]
+                old_job = scheduler._enqueue_message(state(), scheduler._message_input(state()))
+                with scheduler._connect() as connection:
+                    connection.execute(
+                        "UPDATE analysis_job SET status = ?, last_error = ? WHERE id = ?",
+                        (previous_status, "Superseded by current message input" if previous_status == "failed" else None, old_job),
+                    )
+                now += timedelta(days=1)
+                scheduler._classify_one(state())
+                self.assertEqual(first_due, state()["next_action_at"])
+                current_input = scheduler._message_input(state())
+                new_job = scheduler._enqueue_message(state(), current_input)
+
+                self.assertNotEqual(old_job, new_job)
+                self.assertEqual(new_job, scheduler._enqueue_message(state(), current_input))
+                claimed = scheduler.message_processor._claim_job(new_job)
+                self.assertIsNotNone(claimed)
+                self.assertEqual(1, claimed["attempt_count"])
+
     def test_maintain_recovers_interrupted_jobs_and_due_retries(self):
         now = datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
         old = now - timedelta(hours=2)

@@ -189,6 +189,34 @@ class NotesFollowUpSchedulerTest(unittest.TestCase):
         self.assertEqual(1, self.analyze.call_count)
         self.assertEqual("no-action-lead", self.analyze.call_args.args[0]["lead_id"])
 
+    def test_unchanged_waiting_note_preserves_later_scheduled_followup(self):
+        self.records = {"waiting-lead": self.records["waiting-lead"]}
+        processor = self._processor()
+        processor.retire_stale = Mock(return_value=["draft"])
+
+        self.assertEqual(1, processor.run()["retired_stale_reviews"])
+        processor.retire_stale.reset_mock()
+        self.records["waiting-lead"]["sales_name"] = "Updated display name"
+        self.assertEqual(0, processor.run()["retired_stale_reviews"])
+        processor.retire_stale.assert_not_called()
+
+        # An edited card, a new sent message, and a new customer reply must still retire drafts.
+        for field, value in (("body", "Updated conversation"), ("note_id", "new-note"), ("direction", "SHOU")):
+            with self.subTest(field=field):
+                processor.retire_stale.reset_mock()
+                self.records["waiting-lead"]["notes"][0][field] = value
+                self.assertEqual(1, processor.run()["retired_stale_reviews"])
+                processor.retire_stale.assert_called_once()
+
+        self.records["waiting-lead"]["notes"][0].update(
+            note_id="new-outgoing", direction="FA",
+        )
+        processor.retire_stale = Mock(side_effect=[RuntimeError("Outbox unavailable"), []])
+        with self.assertRaisesRegex(RuntimeError, "Outbox unavailable"):
+            processor.run()
+        processor.run()
+        self.assertEqual(2, processor.retire_stale.call_count)
+
     def test_new_waiting_customer_note_supersedes_older_completed_state(self):
         self.records = {"waiting-lead": self.records["waiting-lead"]}
         self.connection.execute(
@@ -394,6 +422,7 @@ class NotesFollowUpSchedulerTest(unittest.TestCase):
         self.assertEqual(["old-message"], retired)
         self.assertIsNone(reject.call_args.kwargs["keep_note_id"])
         self.assertIsNone(dismiss.call_args.kwargs["keep_note_id"])
+        self.assertEqual("superseded", reject.call_args.kwargs["signal_event"])
 
     def test_missing_contact_email_routes_to_action_without_hermes(self):
         self.records = {"reply-lead": self.records["reply-lead"]}
@@ -413,6 +442,21 @@ class NotesFollowUpSchedulerTest(unittest.TestCase):
             "联系人邮箱不可用，无法生成客户回复",
             analysis["semantic"]["reason"],
         )
+
+    def test_linkedin_note_does_not_require_contact_email(self):
+        self.records = {"reply-lead": self.records["reply-lead"]}
+        record = self.records["reply-lead"]
+        record["contact_email"] = None
+        record["contact_linkedin_url"] = (
+            "https://www.linkedin.com/in/reply-lead/"
+        )
+        record["notes"][0]["channel"] = "linkedin"
+        processor = self._processor()
+
+        result = processor.run(limit=1)
+
+        self.assertEqual(1, result["hermes_calls"])
+        self.analyze.assert_called_once()
 
     def test_default_first_run_baselines_history_without_hermes(self):
         processor = NotesFollowUpProcessor(

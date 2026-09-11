@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS secondary_lead_state (
     )),
   classification_due_at TEXT,
   next_action_at TEXT,
+  generation_retry_at TEXT,
   follow_up_count INTEGER NOT NULL DEFAULT 0,
   latest_analysis_job_id TEXT,
   latest_message_version_id TEXT,
@@ -137,6 +138,8 @@ CREATE INDEX IF NOT EXISTS scheduler_run_started_idx
 
 def initialize_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA_SQL)
+    if "generation_retry_at" not in {row[1] for row in connection.execute("PRAGMA table_info(secondary_lead_state)")}:
+        connection.execute("ALTER TABLE secondary_lead_state ADD COLUMN generation_retry_at TEXT")
     row = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
         ("notes_follow_up_state",),

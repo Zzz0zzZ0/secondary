@@ -174,6 +174,8 @@ WITH secondary_records AS (
       ),
       'output', jsonb_build_object(
         'type', CASE
+          WHEN person.source::text ILIKE '%agent%' THEN 'linkedin'
+          WHEN person.source::text = 'CRMGEN_JIN' THEN 'email'
           WHEN person.source::text = 'LINKEDIN' AND contact_channel.linkedin_url IS NOT NULL THEN 'linkedin'
           WHEN person.source::text IN ('EMAIL', 'YOU_XIANG', 'YI_LIU') AND contact_channel.email IS NOT NULL THEN 'email'
           WHEN person.source::text = 'LINKEDIN' AND contact_channel.email IS NOT NULL THEN 'email'
@@ -222,7 +224,8 @@ WITH secondary_records AS (
           THEN 'FOLLOW_UP_TIME_FALLBACK_CREATED_AT'
         END
       ]::text[], NULL)
-    ) AS payload
+    ) || CASE WHEN referral.links IS NOT NULL
+      THEN jsonb_build_object('crm_referral', referral.links) ELSE '{}'::jsonb END AS payload
   FROM "${WORKSPACE_SCHEMA}".person person
   CROSS JOIN LATERAL (
     SELECT
@@ -241,8 +244,35 @@ WITH secondary_records AS (
   LEFT JOIN "${WORKSPACE_SCHEMA}"."workspaceMember" owner
     ON owner.id = company."accountOwnerId"
    AND owner."deletedAt" IS NULL
+  LEFT JOIN LATERAL (
+    SELECT jsonb_build_object(
+      'recommended_by', COALESCE(jsonb_agg(link.contact ORDER BY link.id)
+        FILTER (WHERE link.is_recommender), '[]'::jsonb),
+      'referred_contacts', COALESCE(jsonb_agg(link.contact ORDER BY link.id)
+        FILTER (WHERE link.is_referred), '[]'::jsonb)
+    ) AS links
+    FROM (
+      SELECT related.id, related.id = person."recommendedById" AS is_recommender,
+        related."recommendedById" = person.id AS is_referred,
+        jsonb_strip_nulls(jsonb_build_object(
+          'id', related.id,
+          'name', NULLIF(trim(concat_ws(' ', related."nameFirstName", related."nameLastName")), ''),
+          'job_title', related."jobTitle",
+          'email', NULLIF(related."emailsPrimaryEmail", ''),
+          'linkedin_url', NULLIF(related."linkedinLinkPrimaryLinkUrl", ''),
+          'company_id', related."companyId"
+        )) AS contact
+      FROM "${WORKSPACE_SCHEMA}".person related
+      WHERE related."deletedAt" IS NULL AND related.id <> person.id
+        AND (related.id = person."recommendedById" OR related."recommendedById" = person.id)
+    ) link
+    HAVING count(*) > 0
+  ) referral ON true
   WHERE person."deletedAt" IS NULL
-    AND person."lifeCycle"::text IN ('QUALIFIED', 'NO_DEMAND')
+    AND (person."lifeCycle"::text IN ('QUALIFIED', 'NO_DEMAND')
+      OR (person."lifeCycle"::text = 'NO_REPLY' AND person."recommendedById" <> person.id
+        AND EXISTS (SELECT 1 FROM "${WORKSPACE_SCHEMA}".person referrer
+          WHERE referrer.id=person."recommendedById" AND referrer."deletedAt" IS NULL)))
     AND (
       (:'record_id' <> '' AND person.id::text = :'record_id')
       OR

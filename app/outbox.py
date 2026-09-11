@@ -11,9 +11,17 @@ from .secondary.message_policy import validation_errors
 from .secondary.sender_identity import resolve_sender_identity
 from .secondary_signals import notify_secondary_outbox_event
 from .secondary.message_policy import message_route
+from .secondary.referrals import is_recommender, referral_context, read_referral_history
+from .message_jobs import utc_now, parse_timestamp, isoformat
+from .secondary.review_timing import follow_up_at
+from .secondary.channels import source_channel
 
 
 EMAIL_PATTERN = re.compile(r"^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$")
+
+
+class ReviewContextChanged(RuntimeError):
+    """The content must be reviewed again; no delivery may use this snapshot."""
 
 
 def _body_html(body):
@@ -44,6 +52,50 @@ def _json(value):
     except ImportError as exc:
         raise RuntimeError("Missing dependency. Run: ./scripts/setup_python.sh") from exc
     return Jsonb(value)
+
+
+def ensure_review_current(lead_id, snapshot):
+    """Revalidate the frozen inputs; a review mark is never sending permission."""
+    forced = source_channel((snapshot.get("lead") or {}).get("source"))
+    if forced and (snapshot.get("output") or {}).get("type") != forced:
+        raise ReviewContextChanged("CRM 来源指定的渠道已修正，请按正确渠道重新生成")
+    schedule = snapshot.get("review_schedule") or {}
+    if not schedule:
+        return
+    if not schedule.get("notes_source_hash") or not schedule.get("crm_source_hash"):
+        raise ReviewContextChanged("草稿缺少上下文核查版本，请重新生成后审阅")
+    _, history = read_referral_history(str(lead_id))
+    if history["source_hash"] != schedule["notes_source_hash"]:
+        raise ReviewContextChanged("Notes 已变化，请重新核对草稿；已保存的修改仍保留")
+    from .secondary_scheduler import SecondaryLeadScheduler
+    scheduler = SecondaryLeadScheduler()
+    current = scheduler._export_current_record(str(lead_id))
+    if current is None or scheduler._record_identity(current)[3] != schedule["crm_source_hash"]:
+        raise ReviewContextChanged("CRM 联系人、推荐关系或排期已变化，请重新核对草稿")
+
+
+def ensure_send_ready(lead_id, snapshot):
+    try:
+        due = follow_up_at(snapshot)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("计划跟进时间无效，请重新排期") from exc
+    if due and due > utc_now():
+        raise RuntimeError("尚未到计划跟进时间，可以提前审阅，但不能进入发送队列")
+    ensure_review_current(lead_id, snapshot)
+
+
+def mark_message_reviewed(message_id, reviewer, expected_updated_at):
+    if not isinstance(reviewer, str) or not reviewer.strip():
+        raise RuntimeError("请填写审核人")
+    with connect() as conn, conn.cursor() as cursor:
+        row = _pending_message(cursor, message_id)
+        if parse_timestamp(str(row[9])) != parse_timestamp(expected_updated_at):
+            raise RuntimeError("草稿已被更新，请刷新后重新审阅")
+        ensure_review_current(row[1], row[3])
+        snapshot = dict(row[3])
+        snapshot["content_review"] = {"reviewed_at": isoformat(utc_now()), "reviewed_by": reviewer.strip()}
+        cursor.execute("UPDATE sales_automation.message_version SET crm_snapshot=%s, updated_at=now() WHERE id=%s", (_json(snapshot), message_id))
+    return get_review_message(message_id)
 
 
 def preflight():
@@ -263,7 +315,7 @@ def _pending_message(cursor, message_id):
     cursor.execute(
         """
         SELECT id, lead_id, recipient_original, crm_snapshot,
-               original_output, edited_output, review_status, version, channel
+               original_output, edited_output, review_status, version, channel, updated_at
         FROM sales_automation.message_version
         WHERE id = %s FOR UPDATE
         """,
@@ -300,7 +352,7 @@ def save_message_edit(message_id, subject, body):
         cursor.execute(
             """
             UPDATE sales_automation.message_version
-            SET edited_output = %s, updated_at = now()
+            SET edited_output = %s, crm_snapshot = crm_snapshot - 'content_review', updated_at = now()
             WHERE id = %s
             """,
             (_json(effective), message_id),
@@ -308,10 +360,14 @@ def save_message_edit(message_id, subject, body):
     return get_review_message(message_id)
 
 
-def replace_message_draft(message_id, output):
+def replace_message_draft(message_id, output, crm_snapshot=None, expected_updated_at=None):
     with connect() as conn, conn.cursor() as cursor:
         row = _pending_message(cursor, message_id)
-        crm_snapshot = dict(row[3] or {})
+        if expected_updated_at and parse_timestamp(str(row[9])) != parse_timestamp(str(expected_updated_at)):
+            raise RuntimeError("草稿在生成期间被修改，保留已有修改，请重新审阅")
+        crm_snapshot = dict(crm_snapshot if crm_snapshot is not None else row[3] or {})
+        if expected_updated_at:
+            ensure_review_current(row[1], crm_snapshot)
         crm_snapshot["message_route"] = message_route(crm_snapshot, None)
         errors = validation_errors(output, crm_snapshot, str(row[1]))
         if errors:
@@ -325,10 +381,10 @@ def replace_message_draft(message_id, output):
         cursor.execute(
             """
             UPDATE sales_automation.message_version
-            SET edited_output = %s, updated_at = now()
+            SET edited_output = %s, crm_snapshot = %s, updated_at = now()
             WHERE id = %s
             """,
-            (_json(output), message_id),
+            (_json(output), _json({key: value for key, value in crm_snapshot.items() if key != "content_review"}), message_id),
         )
     return get_review_message(message_id)
 
@@ -347,6 +403,17 @@ def approve_message(message_id, reviewer, subject=None, body=None, note=None):
                 raise RuntimeError(
                     "Notes review-only messages cannot be approved for delivery"
                 )
+            if is_recommender(crm):
+                raise RuntimeError("推荐人消息已停用，请转到被推荐联系人并核对其 Notes")
+            ensure_send_ready(row[1], crm)
+            context = referral_context(crm) or {}
+            if context.get("current_contact_role") == "referred":
+                expected = crm.get("referral_history_check") or {}
+                if not expected.get("source_hash"):
+                    raise RuntimeError("尚未核对被推荐人的 Notes，请重新生成后审核")
+                _, current_history = read_referral_history(str(row[1]))
+                if current_history["source_hash"] != expected["source_hash"]:
+                    raise RuntimeError("被推荐人的 Notes 已变化，请重新生成后审核，避免重复发信")
             sender_account_ref = None
             effective = json.loads(json.dumps(row[5] or original))
             content = dict(effective.get("content") or {})
@@ -468,6 +535,7 @@ def reject_pending_messages_for_lead(
     note=None,
     keep_note_id=None,
     keep_email_at=None,
+    signal_event="rejected",
 ):
     """Reject every pending draft for a lead and emit one signal per draft."""
     with connect() as conn, conn.cursor() as cursor:
@@ -499,7 +567,7 @@ def reject_pending_messages_for_lead(
             )
 
     for message_id in message_ids:
-        notify_secondary_outbox_event(message_id, "rejected")
+        notify_secondary_outbox_event(message_id, signal_event)
     return message_ids
 
 

@@ -90,6 +90,9 @@ stage supplies an exact CRM quote proving that the salesperson already replied.
 - Do not thank the customer for interest unless separate customer evidence proves it.
 - If the prior reply's content is unavailable, use a generic check-in and ask at
   most whether any additional information would be helpful.
+- When `secondary_lead_schedule.timing_verified=true` and contact is allowed,
+  generate that ordinary follow-up even without a new reply or purchasing need.
+  Previous follow-up is the reason to use the supplied cadence, not to stop it.
 - If timing is not verified, no customer message should have been requested;
   return `no_message` with `FOLLOW_UP_TIMING_UNVERIFIED` if such an input appears.
 

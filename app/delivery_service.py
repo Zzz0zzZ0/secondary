@@ -5,6 +5,7 @@ import uuid
 
 from .db import connect
 from .secondary_signals import notify_secondary_outbox_event
+from .outbox import ensure_send_ready, ReviewContextChanged
 
 
 def _cooldown_hours():
@@ -76,6 +77,18 @@ def claim_delivery(worker_id, channels, providers):
         )
         row = cursor.fetchone()
         if row is None:
+            return None
+        cursor.execute("SELECT lead_id,crm_snapshot FROM sales_automation.message_version WHERE id=%s", (row[1],))
+        message = cursor.fetchone()
+        if message is None:
+            raise RuntimeError("Delivery has no source review message")
+        try:
+            ensure_send_ready(message[0], message[1])
+        except ReviewContextChanged as exc:
+            cursor.execute("UPDATE sales_automation.delivery_outbox SET status='cancelled', last_error_code='REVIEW_CONTEXT_CHANGED', last_error_message=%s, updated_at=now() WHERE id=%s", (str(exc), row[0]))
+            cursor.execute("UPDATE sales_automation.message_version SET review_status='pending_review', version=version+1, crm_snapshot=crm_snapshot - 'content_review', updated_at=now() WHERE id=%s", (row[1],))
+            conn.commit()
+            notify_secondary_outbox_event(row[1], "review_invalidated")
             return None
         attempt_id = uuid.uuid4()
         cursor.execute(

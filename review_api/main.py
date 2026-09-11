@@ -19,6 +19,7 @@ from app.outbox import (
     list_review_messages,
     reject_message,
     save_message_edit,
+    mark_message_reviewed,
 )
 from app.secondary_scheduler import SecondaryLeadScheduler
 from app.runtime_report import (
@@ -74,6 +75,11 @@ class MessageDecisionRequest(MessageEditRequest):
 class MessageRejectRequest(BaseModel):
     reviewer: str = Field(default="review-ui", min_length=1, max_length=200)
     note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class MessageContentReviewRequest(BaseModel):
+    reviewer: str = Field(default="review-ui", min_length=1, max_length=200)
+    expected_updated_at: str = Field(min_length=1, max_length=100)
 
 
 class MessageRegenerateRequest(BaseModel):
@@ -237,7 +243,7 @@ def polling_queue(
 
 @app.get("/api/review/messages")
 def review_messages(
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=50, ge=1, le=1000),
     status: Literal["pending_review", "approved", "rejected"] = (
         "pending_review"
     ),
@@ -325,6 +331,14 @@ def regenerate_message(
             detail="待审消息不存在",
         ) from exc
     except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/review/messages/{message_id}/reviewed")
+def mark_review_message(message_id: str, request: MessageContentReviewRequest):
+    try:
+        return mark_message_reviewed(message_id, request.reviewer, request.expected_updated_at)
+    except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

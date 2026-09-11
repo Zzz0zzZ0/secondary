@@ -99,6 +99,15 @@ outbox_migrate() {
   python_cli migrate
 }
 
+mac_service() {
+  local python_bin="$PROJECT_DIR/.venv/bin/python"
+  if [[ ! -x "$python_bin" ]]; then
+    printf 'Python environment missing. First run option 8.\n' >&2
+    return 2
+  fi
+  "$python_bin" -m app.macos_service "${1:-status}"
+}
+
 ensure_config() {
   load_config
   if [[ -z "${TWENTY_DB_HOST:-}" ]]; then
@@ -232,8 +241,9 @@ case "${1:-menu}" in
   open) open_report ;;
   setup) setup_python ;;
   migrate) outbox_migrate ;;
+  mac) mac_service "${2:-status}" ;;
   *)
-    printf 'Usage: %s [menu|configure|check|discover|export|products|run|report [RUN_DIR]|open|setup|migrate]\n' "$0" >&2
+    printf 'Usage: %s [menu|configure|check|discover|export|products|run|report [RUN_DIR]|open|setup|migrate|mac install|status|uninstall]\n' "$0" >&2
     exit 2
     ;;
 esac

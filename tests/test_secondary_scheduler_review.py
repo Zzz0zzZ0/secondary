@@ -5,13 +5,26 @@ from unittest.mock import Mock, patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.secondary_scheduler import SALES_FOLLOW_UP_TIME_UNVERIFIED
 from app.secondary_scheduler import SecondaryLeadScheduler
 from app.secondary_scheduler import _crm_next_follow_up_at
+from app.secondary_scheduler import _prefer_valid_contact_channel
 from app.secondary_scheduler import _sales_follow_up_due_at
 
 
 class SecondarySchedulerReviewTest(unittest.TestCase):
+    def test_invalid_linkedin_route_falls_back_to_valid_email(self):
+        record = {
+            "contact": {
+                "email": "buyer@example.com",
+                "linkedin_url": "linkedin.com/in/not-an-absolute-url",
+            },
+            "output": {"type": "linkedin", "default_language": "English"},
+        }
+
+        _prefer_valid_contact_channel(record)
+
+        self.assertEqual("email", record["output"]["type"])
+
     def test_full_scan_converts_and_retires_leads_missing_from_crm_scope(self):
         now = datetime(2026, 8, 27, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
@@ -303,7 +316,7 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
 
             scheduler.run_cycle(trigger="test")
 
-            self.assertEqual(["notes", "classify", "dispatch"], calls)
+            self.assertEqual(["notes", "dispatch", "classify"], calls)
 
     def test_main_classification_skips_lead_owned_by_current_notes(self):
         now = datetime(2026, 8, 21, tzinfo=timezone.utc)
@@ -551,7 +564,7 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
                 self.assertGreaterEqual(days, low)
                 self.assertLessEqual(days, high)
 
-    def test_sales_reply_without_reliable_time_requires_review(self):
+    def test_sales_reply_without_reliable_time_schedules_from_classification(self):
         now = datetime(2026, 8, 8, tzinfo=timezone.utc)
         record = {
             "lead": {"id": "lead-1", "internal_note": "销售已回复客户。"},
@@ -610,8 +623,14 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
 
             result = scheduler._classify_one(row)
 
-            self.assertEqual("needs_review", result["status"])
-            self.assertIsNone(result["next_action_at"])
+            expected_next_action = (
+                now
+                + timedelta(
+                    days=scheduler._interval_days("unknown_demand", "lead-1", 0)
+                )
+            ).isoformat()
+            self.assertEqual("scheduled", result["status"])
+            self.assertEqual(expected_next_action, result["next_action_at"])
             with scheduler._connect() as connection:
                 stored = connection.execute(
                     """
@@ -620,12 +639,9 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
                     WHERE lead_id = 'lead-1'
                     """
                 ).fetchone()
-            self.assertEqual("needs_review", stored["status"])
-            self.assertIsNone(stored["next_action_at"])
-            self.assertEqual(
-                SALES_FOLLOW_UP_TIME_UNVERIFIED,
-                stored["last_error"],
-            )
+            self.assertEqual("scheduled", stored["status"])
+            self.assertEqual(expected_next_action, stored["next_action_at"])
+            self.assertIsNone(stored["last_error"])
 
     def test_waiting_customer_uses_last_sales_time_for_maintenance(self):
         now = datetime(2026, 8, 8, tzinfo=timezone.utc)
@@ -820,6 +836,67 @@ class SecondarySchedulerReviewTest(unittest.TestCase):
             self.assertEqual("needs_review", row["status"])
             self.assertIsNone(row["latest_message_version_id"])
             self.assertIsNone(row["last_generated_at"])
+
+    def test_superseded_message_requeues_lead_without_human_attention(self):
+        now = datetime(2026, 8, 8, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            scheduler = SecondaryLeadScheduler(
+                state_dir=Path(directory),
+                environment={},
+                now=lambda: now,
+            )
+            with scheduler._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO secondary_lead_state
+                      (lead_id, source_hash, source_updated_at, source_record_id,
+                       crm_snapshot_json, lead_type, status,
+                       latest_message_version_id, last_classified_at,
+                       last_generated_at, last_seen_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, '{}', ?, 'waiting_review', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "lead-1",
+                        "source-1",
+                        now.isoformat(),
+                        "lead-1",
+                        "unknown_demand",
+                        "message-1",
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+            self.assertTrue(
+                scheduler.handle_outbox_signal("message-1", "superseded")
+            )
+
+            with scheduler._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT status, classification_due_at,
+                           latest_message_version_id, last_generated_at
+                    FROM secondary_lead_state
+                    WHERE lead_id = 'lead-1'
+                    """
+                ).fetchone()
+                event = connection.execute(
+                    """
+                    SELECT event_type
+                    FROM secondary_lead_event
+                    WHERE lead_id = 'lead-1'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            self.assertEqual("settling", row["status"])
+            self.assertEqual(now.isoformat(), row["classification_due_at"])
+            self.assertIsNone(row["latest_message_version_id"])
+            self.assertIsNone(row["last_generated_at"])
+            self.assertEqual("outbox_superseded", event["event_type"])
 
     def test_sales_reply_enters_maintenance_after_automated_follow_up(self):
         now = datetime(2026, 8, 8, tzinfo=timezone.utc)

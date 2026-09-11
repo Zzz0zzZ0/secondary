@@ -21,7 +21,7 @@ type ReviewPriorityKind =
   | "overdue_48h"
   | "overdue"
   | "due_24h"
-  | "scheduled"
+  | "advance_review"
   | "unscheduled";
 type ReviewPriority = {
   kind: ReviewPriorityKind;
@@ -196,6 +196,11 @@ const reviewRouteFilter = document.querySelector<HTMLSelectElement>(
 )!;
 let pendingReviewAll: ReviewMessage[] = [];
 let visibleReviewMessages: ReviewMessage[] = [];
+let selectedReviewId: string | null = null;
+// Page-local only: preserve edits and expanded evidence when switching records.
+const reviewDetailCache = new Map<string, { version: string; panels: HTMLElement[] }>();
+const queueDetailCache = new Map<string, LeadDetail>();
+
 const conversationActionsButton = document.querySelector<HTMLButtonElement>(
   "#conversation-actions-button",
 )!;
@@ -277,7 +282,8 @@ const warningLabels: Record<string, string> = {
 };
 const messageRouteLabels: Record<string, string> = {
   email_reply: "客户邮件待回复",
-  recommender_thanks: "推荐人待感谢",
+  recommender_thanks: "推荐人旧草稿（已停用）",
+  referral_handoff: "转交被推荐联系人",
   referred_intro: "被推荐人待联系",
   qualification: "需求待确认",
   conversation_follow_up: "已沟通待跟进",
@@ -365,15 +371,15 @@ function reviewScheduleAt(message: ReviewMessage): string | null {
   const snapshot = message.crm_snapshot || {};
   const contact = snapshot.contact || {};
   const lead = snapshot.lead || {};
-  const value =
-    contact.nextFollowUp ||
-    contact.next_follow_up_at ||
-    lead.nextFollowUp ||
-    lead.next_follow_up_at ||
-    snapshot.follow_up_schedule?.effective_next_follow_up_at ||
-    snapshot.secondary_lead_schedule?.next_action_at ||
-    lead.next_eligible_follow_up_at;
-  return value ? String(value) : null;
+  const values = [
+    snapshot.review_schedule?.follow_up_at,
+    contact.nextFollowUp, contact.next_follow_up_at,
+    lead.nextFollowUp, lead.next_follow_up_at,
+    snapshot.follow_up_schedule?.effective_next_follow_up_at,
+    snapshot.secondary_lead_schedule?.next_action_at,
+    lead.next_eligible_follow_up_at,
+  ].filter((value) => value && Number.isFinite(new Date(value).getTime()));
+  return values.length ? new Date(Math.max(...values.map((value) => new Date(value).getTime()))).toISOString() : null;
 }
 
 function reviewPriority(message: ReviewMessage, now = Date.now()): ReviewPriority {
@@ -406,7 +412,7 @@ function reviewPriority(message: ReviewMessage, now = Date.now()): ReviewPriorit
   if (dueAt <= now - 48 * 60 * 60 * 1000) {
     return {
       kind: "overdue_48h",
-      label: "严重逾期",
+      label: `严重逾期 · ${Math.floor((now - dueAt) / 86400000)} 天`,
       rank: 1,
       at,
       timing: `计划 ${formatDateTime(at)}`,
@@ -415,7 +421,7 @@ function reviewPriority(message: ReviewMessage, now = Date.now()): ReviewPriorit
   if (dueAt <= now) {
     return {
       kind: "overdue",
-      label: "已到期",
+      label: "已到期 · 可跟进",
       rank: 2,
       at,
       timing: `计划 ${formatDateTime(at)}`,
@@ -424,15 +430,15 @@ function reviewPriority(message: ReviewMessage, now = Date.now()): ReviewPriorit
   if (dueAt <= now + 24 * 60 * 60 * 1000) {
     return {
       kind: "due_24h",
-      label: "24 小时内",
+      label: `即将到期 · ${Math.max(1, Math.ceil((dueAt - now) / 3600000))} 小时后`,
       rank: 3,
       at,
       timing: `计划 ${formatDateTime(at)}`,
     };
   }
   return {
-    kind: "scheduled",
-    label: "后续排期",
+    kind: "advance_review",
+    label: `提前审阅 · ${Math.ceil((dueAt - now) / 86400000)} 天后跟进`,
     rank: 4,
     at,
     timing: `计划 ${formatDateTime(at)}`,
@@ -449,6 +455,7 @@ function renderReviewPriorityStats(records: ReviewMessage[]): void {
       priorities.filter((kind) => kind === "overdue_48h" || kind === "overdue").length,
     ],
     ["24 小时内", priorities.filter((kind) => kind === "due_24h").length],
+    ["提前审阅", priorities.filter((kind) => kind === "advance_review").length],
   ];
   reviewPriorityStats.replaceChildren(
     ...stats.map(([label, value]) => {
@@ -830,6 +837,7 @@ function selectReviewMessage(messageId: string, focusListItem = false): void {
     `[data-message-id="${CSS.escape(messageId)}"]`,
   );
   if (!message || !button) return;
+  selectedReviewId = messageId;
   recordList.querySelectorAll<HTMLButtonElement>(".record-item").forEach((item) => {
     const active = item === button;
     item.classList.toggle("active", active);
@@ -852,6 +860,11 @@ function selectNextReviewMessage(messageId: string): void {
 }
 
 function renderReviewMessageDetail(message: ReviewMessage) {
+  const cached = reviewDetailCache.get(message.id);
+  if (cached && cached.version === message.updated_at) {
+    detail.replaceChildren(...cached.panels);
+    return;
+  }
   const snapshot = message.crm_snapshot || {};
   const lead = snapshot.lead || {};
   const company = snapshot.company || {};
@@ -891,23 +904,42 @@ function renderReviewMessageDetail(message: ReviewMessage) {
     ["消息版本", message.version],
     ["生成时间", formatDateTime(message.created_at)],
   ].forEach(([key, value]) => crmFields.append(field(String(key), value)));
+  const timingBadge = badge(priority.label, `priority-${priority.kind}`);
+  const scheduleField = field("计划跟进", formatDateTime(reviewScheduleAt(message)));
+  crmFields.append(scheduleField);
   crmPanel.append(
     crmHeading,
+    timingBadge,
     crmFields,
     block(
       "CRM 内文本",
       snapshot.review_context?.crm_internal_note || lead.internal_note,
     ),
   );
+  const referral = snapshot.referral_context;
+  if (referral) {
+    const roleLabels: Record<string, string> = { recommender: "推荐人", referred: "被推荐人", both: "兼有推荐与被推荐关系，需核对本次联系目的" };
+    const related = referral.related_contacts || [];
+    const incoming = referral.recommended_by || (referral.current_contact_role === "referred" ? related : []);
+    const outgoing = referral.referred_contacts || (referral.current_contact_role === "recommender" ? related : []);
+    crmPanel.append(block("推荐关系", [
+      `当前联系人：${roleLabels[referral.current_contact_role] || "待核对"}`,
+      ...incoming.map((person: Json) => `推荐人：${person.name} · ${person.email || person.linkedin_url || person.id || ""}`),
+      ...outgoing.map((person: Json) => `被推荐联系人：${person.name} · ${person.email || person.linkedin_url || person.id || ""}`),
+    ].join("\n")));
+  }
+  if (snapshot.referral_history_check) {
+    crmPanel.append(block("被推荐人发信历史检查", `已核对 Notes：${snapshot.referral_history_check.outbound_count || 0} 条我方发信记录；批准前会重新检查。`));
+  }
   if (snapshot.review_context?.crm_email_evidence) {
     crmPanel.append(
-      block("邮件往来证据", snapshot.review_context.crm_email_evidence.evidence_quote),
+      block("Notes 对话证据", snapshot.review_context.crm_email_evidence.evidence_quote),
     );
   }
   if (snapshot.review_context?.crm_email_history) {
     crmPanel.append(
       block(
-        "完整邮件上下文",
+        "完整对话上下文",
         emailHistoryText(snapshot.review_context.crm_email_history),
         { collapsible: true },
       ),
@@ -920,7 +952,9 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   const notesReviewOnly =
     snapshot.notes_review_only === true || snapshot.notes_experiment === true;
   const approvalBlocked =
-    snapshot.message_route === "referral_review" || notesReviewOnly;
+    snapshot.message_route === "referral_review" || notesReviewOnly ||
+    ["recommender_thanks", "referral_handoff"].includes(snapshot.message_route) ||
+    snapshot.referral_context?.current_contact_role === "recommender";
   if (snapshot.message_route === "referral_review") {
     crmPanel.append(
       block(
@@ -943,10 +977,8 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   reviewHeading.className = "panel-heading";
   const reviewTitle = document.createElement("h2");
   reviewTitle.textContent = "人工审阅";
-  reviewHeading.append(
-    reviewTitle,
-    badge("等待审阅", "generated"),
-  );
+  const reviewedBadge = badge("等待审阅", "neutral");
+  reviewHeading.append(reviewTitle, reviewedBadge);
 
   const editor = document.createElement("form");
   editor.className = "review-editor";
@@ -994,6 +1026,10 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   const saveButton = document.createElement("button");
   const regenerateButton = document.createElement("button");
   const approveButton = document.createElement("button");
+  const reviewedButton = document.createElement("button");
+  reviewedButton.type = "button";
+  reviewedButton.className = "secondary";
+  reviewedButton.textContent = "标记已审阅";
   const rejectButton = document.createElement("button");
   const nextButton = document.createElement("button");
   saveButton.type = regenerateButton.type = approveButton.type = rejectButton.type =
@@ -1008,28 +1044,45 @@ function renderReviewMessageDetail(message: ReviewMessage) {
   approveButton.className = "approve";
   rejectButton.className = "reject";
   nextButton.className = "next";
-  actions.append(saveButton, regenerateButton, approveButton, rejectButton, nextButton);
+  actions.append(saveButton, regenerateButton, reviewedButton, approveButton, rejectButton, nextButton);
   if (approvalBlocked) {
     approveButton.disabled = true;
     approveButton.title = notesReviewOnly
       ? "Notes 人工审阅消息禁止批准发送"
-      : "推荐关系未核对，禁止批准发送";
+      : "推荐关系需核对或当前为推荐人，禁止批准发送";
   }
 
-  const buttons = [
-    saveButton,
-    regenerateButton,
-    approveButton,
-    rejectButton,
-  ];
+  const buttons = [saveButton, regenerateButton, reviewedButton, approveButton, rejectButton];
   nextButton.addEventListener("click", () => selectNextReviewMessage(message.id));
-  const setBusy = (busy: boolean) => {
+  let isBusy = false;
+  const updateTiming = () => {
+    const current = reviewPriority(message);
+    const future = ["advance_review", "due_24h"].includes(current.kind);
+    const reviewed = message.crm_snapshot?.content_review;
+    timingBadge.className = `badge priority-${current.kind}`;
+    timingBadge.textContent = current.label;
+    scheduleField.querySelector("dd")!.textContent = formatDateTime(reviewScheduleAt(message));
+    // Existing detail fields also track the live priority without rebuilding editors.
+    for (const field of crmFields.children) {
+      const label = field.querySelector("dt")?.textContent;
+      if (label === "处理优先级") field.querySelector("dd")!.textContent = current.label;
+      if (label === "优先依据") field.querySelector("dd")!.textContent = current.timing;
+    }
+    const saved = message.effective_output?.content || {};
+    const dirty = bodyInput.value !== saved.body || (message.channel === "email" && subjectInput.value !== saved.subject);
+    reviewedBadge.textContent = dirty ? "有未保存修改" : reviewed ? (future ? "✓ 已审阅 · 待到期" : "✓ 已审阅") : "等待审阅";
+    reviewedBadge.title = reviewed ? `${reviewed.reviewed_by} · ${formatDateTime(reviewed.reviewed_at)}` : "";
     buttons.forEach((button) => {
-      button.disabled = busy || (
-        button === approveButton && approvalBlocked
-      );
+      button.disabled = isBusy || (button === approveButton && (approvalBlocked || future));
     });
+    approveButton.title = approvalBlocked ? (notesReviewOnly ? "Notes 人工审阅消息禁止批准发送" : "推荐关系需核对，禁止批准发送")
+      : future ? "尚未到计划跟进时间，可先标记已审阅" : "到期后仍需人工确认，系统会核查最新 Notes";
   };
+  reviewPanel.addEventListener("review-time-update", updateTiming);
+  bodyInput.addEventListener("input", updateTiming);
+  subjectInput.addEventListener("input", updateTiming);
+  const setBusy = (busy: boolean) => { isBusy = busy; updateTiming(); };
+  updateTiming();
   const editPayload = () => ({
     subject: message.channel === "email" ? subjectInput.value : null,
     body: bodyInput.value,
@@ -1048,12 +1101,40 @@ function renderReviewMessageDetail(message: ReviewMessage) {
         },
       );
       Object.assign(message, updated);
-      renderReviewMessageDetail(message);
+      reviewDetailCache.set(message.id, { version: message.updated_at, panels: [crmPanel, reviewPanel] });
+      bodyInput.value = text(message.effective_output?.content?.body, bodyInput.value);
+      const editedBadge = crmHeading.querySelector<HTMLElement>(".badge");
+      if (editedBadge) {
+        editedBadge.textContent = "已有修改";
+        editedBadge.className = "badge generated";
+      }
+      setBusy(false);
+      refreshReviewTiming();
       setStatus("人工修改已保存，消息仍等待审阅", "success");
     } catch (error) {
       setBusy(false);
       showError(error);
     }
+  });
+
+  reviewedButton.addEventListener("click", async () => {
+    setBusy(true);
+    try {
+      const saved = message.effective_output?.content || {};
+      if (bodyInput.value !== saved.body || (message.channel === "email" && subjectInput.value !== saved.subject)) {
+        Object.assign(message, await request<ReviewMessage>(`/api/review/messages/${encodeURIComponent(message.id)}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(editPayload()),
+        }));
+      }
+      Object.assign(message, await request<ReviewMessage>(`/api/review/messages/${encodeURIComponent(message.id)}/reviewed`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewer: reviewerInput.value, expected_updated_at: message.updated_at }),
+      }));
+      reviewDetailCache.set(message.id, { version: message.updated_at, panels: [crmPanel, reviewPanel] });
+      refreshReviewTiming();
+      setStatus("已标记审阅完成；计划时间到达后仍需人工确认发送", "success");
+    } catch (error) { showError(error); }
+    finally { setBusy(false); }
   });
 
   regenerateButton.addEventListener("click", async () => {
@@ -1089,7 +1170,8 @@ function renderReviewMessageDetail(message: ReviewMessage) {
         },
       );
       Object.assign(message, result.message);
-      renderReviewMessageDetail(message);
+      reviewDetailCache.delete(message.id);
+      if (selectedReviewId === message.id && recordListTitle.textContent === "待处理发信") renderReviewMessageDetail(message);
       setStatus(
         `Hermes 已重新生成（${result.run_id}），结果仍等待人工审阅`,
         "success",
@@ -1118,7 +1200,7 @@ function renderReviewMessageDetail(message: ReviewMessage) {
         },
       );
       setStatus("消息已批准并进入 Outbox", "success");
-      await loadReviewMessages();
+      removeReviewedMessage(message.id);
       loadDashboard().catch(() => undefined);
     } catch (error) {
       setBusy(false);
@@ -1143,7 +1225,7 @@ function renderReviewMessageDetail(message: ReviewMessage) {
         },
       );
       setStatus("消息已拒绝，未进入 Outbox", "success");
-      await loadReviewMessages();
+      removeReviewedMessage(message.id);
       loadDashboard().catch(() => undefined);
     } catch (error) {
       setBusy(false);
@@ -1164,10 +1246,30 @@ function renderReviewMessageDetail(message: ReviewMessage) {
     editor,
     block("中文对照（仅供审阅）", content.body_zh, { collapsible: true }),
   );
+  reviewDetailCache.set(message.id, { version: message.updated_at, panels: [crmPanel, reviewPanel] });
   detail.replaceChildren(crmPanel, reviewPanel);
 }
 
+function removeReviewedMessage(messageId: string): void {
+  const index = visibleReviewMessages.findIndex((item) => item.id === messageId);
+  const next = visibleReviewMessages[index + 1] || visibleReviewMessages[index - 1];
+  pendingReviewAll = pendingReviewAll.filter((item) => item.id !== messageId);
+  visibleReviewMessages = visibleReviewMessages.filter((item) => item.id !== messageId);
+  reviewDetailCache.delete(messageId);
+  if (recordListTitle.textContent !== "待处理发信") return;
+  recordList.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`)?.remove();
+  recordCount.textContent = `${visibleReviewMessages.length} 条`;
+  renderReviewPriorityStats(pendingReviewAll);
+  if (next) selectReviewMessage(next.id);
+  else {
+    selectedReviewId = null;
+    detail.replaceChildren(block("待审消息", "当前筛选下没有等待审阅的消息"));
+  }
+}
+
 function renderReviewMessages(records: ReviewMessage[]) {
+  const scrollTop = recordList.scrollTop;
+  const selected = records.find((item) => item.id === selectedReviewId) || records[0];
   visibleReviewMessages = records;
   recordList.replaceChildren();
   detail.replaceChildren();
@@ -1195,14 +1297,37 @@ function renderReviewMessages(records: ReviewMessage[]) {
       subtitle,
       badge(priority.label, `priority-${priority.kind}`),
     );
+    const reviewedState = document.createElement("small");
+    reviewedState.className = "content-review-state";
+    reviewedState.textContent = message.crm_snapshot?.content_review ? "✓ 已审阅" : "待审阅";
+    button.append(reviewedState);
     button.addEventListener("click", () => selectReviewMessage(message.id));
     recordList.append(button);
-    if (index === 0) button.click();
+
   });
+  if (selected) selectReviewMessage(selected.id);
+  recordList.scrollTop = scrollTop;
   if (!records.length) {
     detail.append(block("待审消息", "当前没有等待人工审阅的正式消息"));
   }
   workspace.classList.remove("hidden");
+}
+
+function refreshReviewTiming(): void {
+  for (const message of visibleReviewMessages) {
+    const button = recordList.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(message.id)}"]`);
+    if (!button) continue;
+    const priority = reviewPriority(message);
+    button.dataset.priorityKind = priority.kind;
+    const label = button.querySelector<HTMLElement>(".badge");
+    if (label) { label.className = `badge priority-${priority.kind}`; label.textContent = priority.label; }
+    const state = button.querySelector<HTMLElement>(".content-review-state");
+    if (state) state.textContent = message.crm_snapshot?.content_review ? "✓ 已审阅" : "待审阅";
+  }
+  for (const cached of reviewDetailCache.values()) {
+    cached.panels.forEach((panel) => panel.dispatchEvent(new Event("review-time-update")));
+  }
+  if (recordListTitle.textContent === "待处理发信") renderReviewPriorityStats(pendingReviewAll);
 }
 
 function renderConversationActionDetail(action: ConversationAction) {
@@ -1242,7 +1367,7 @@ function renderConversationActionDetail(action: ConversationAction) {
   panel.append(
     block("关键证据", evidence.evidence_quote),
     block(
-      "Notes 邮件上下文",
+      "Notes 对话上下文",
       emailHistoryText(snapshot.review_context?.crm_email_history) || evidence.note_text,
       { collapsible: true },
     ),
@@ -1296,7 +1421,13 @@ function renderConversationActionDetail(action: ConversationAction) {
         },
       );
       setStatus(decision === "resolved" ? "会话动作已处理" : "会话动作已忽略", "success");
-      await loadConversationActions();
+      if (recordListTitle.textContent !== "会话动作") return;
+      const button = recordList.querySelector(`[data-action-id="${CSS.escape(action.id)}"]`);
+      const next = (button?.nextElementSibling || button?.previousElementSibling) as HTMLButtonElement | null;
+      button?.remove();
+      recordCount.textContent = `${recordList.childElementCount} 条`;
+      if (next) next.click();
+      else detail.replaceChildren(block("会话动作", "当前没有等待人工处理的会话动作"));
     } catch (error) {
       resolveButton.disabled = dismissButton.disabled = false;
       showError(error);
@@ -1324,6 +1455,7 @@ function renderConversationActions(records: ConversationAction[]) {
   records.forEach((action, index) => {
     const button = document.createElement("button");
     button.type = "button";
+    button.dataset.actionId = action.id;
     button.className = "record-item";
     const title = document.createElement("strong");
     const subtitle = document.createElement("span");
@@ -1468,7 +1600,7 @@ function renderQueueDetail(record: QueueRecord, leadDetail?: LeadDetail) {
   }
   if (notesFollowUp?.notes?.length) {
     schedulePanel.append(
-      block("CRM Notes 邮件上下文", emailHistoryText(notesFollowUp.notes)),
+      block("CRM Notes 对话上下文", emailHistoryText(notesFollowUp.notes)),
     );
   }
 
@@ -1529,6 +1661,7 @@ function renderQueueDetail(record: QueueRecord, leadDetail?: LeadDetail) {
           const refreshed = await request<LeadDetail>(
             `/api/polling/leads/${encodeURIComponent(record.lead_id)}`,
           );
+          queueDetailCache.set(record.lead_id, refreshed);
           renderQueueDetail(record, refreshed);
           const active = recordList.querySelector<HTMLElement>(".record-item.active");
           const title = active?.querySelector("strong");
@@ -1588,6 +1721,7 @@ function renderQueueDetail(record: QueueRecord, leadDetail?: LeadDetail) {
         const refreshed = await request<LeadDetail>(
           `/api/polling/leads/${encodeURIComponent(record.lead_id)}`,
         );
+        queueDetailCache.set(record.lead_id, refreshed);
         renderQueueDetail(record, refreshed);
         const active = recordList.querySelector<HTMLElement>(".record-item.active");
         const statusBadge = active?.querySelector<HTMLElement>(".badge");
@@ -1660,12 +1794,15 @@ function renderQueue(records: QueueRecord[]) {
     button.addEventListener("click", async () => {
       recordList.querySelectorAll(".active").forEach((node) => node.classList.remove("active"));
       button.classList.add("active");
-      renderQueueDetail(record);
+      const cached = queueDetailCache.get(record.lead_id);
+      renderQueueDetail(record, cached);
+      if (cached) return;
       try {
         const lead = await request<LeadDetail>(
           `/api/polling/leads/${encodeURIComponent(record.lead_id)}`,
         );
-        if (button.classList.contains("active")) renderQueueDetail(record, lead);
+        queueDetailCache.set(record.lead_id, lead);
+        if (button.isConnected && button.classList.contains("active")) renderQueueDetail(record, lead);
       } catch (error) {
         if (button.classList.contains("active")) {
           setStatus(
@@ -1687,7 +1824,6 @@ function showError(error: unknown) {
 
 async function loadQueue(statuses: string[] = []) {
   pollQueueButton.disabled = true;
-  workspace.classList.add("hidden");
   setStatus("正在读取二级线索队列…", "running");
   const parameters = new URLSearchParams({ limit: "500" });
   if (statuses.length) parameters.set("status", statuses.join(","));
@@ -1695,6 +1831,7 @@ async function loadQueue(statuses: string[] = []) {
     const result = await request<{ records: QueueRecord[] }>(
       `/api/polling/queue?${parameters.toString()}`,
     );
+    queueDetailCache.clear();
     renderQueue(result.records);
     const scope = statuses.length
       ? statuses.map((status) => queueStatusLabels[status] || status).join("、")
@@ -1712,13 +1849,17 @@ async function loadQueue(statuses: string[] = []) {
 
 async function loadReviewMessages() {
   reviewMessagesButton.disabled = true;
-  workspace.classList.add("hidden");
   setStatus("正在读取 Outbox 前的待审消息…", "running");
   try {
     const result = await request<{ records: ReviewMessage[] }>(
-      "/api/review/messages?status=pending_review&limit=200",
+      "/api/review/messages?status=pending_review&limit=1000",
     );
-    pendingReviewAll = result.records;
+    const fresh = new Map(result.records.map((message) => [message.id, message.updated_at]));
+    for (const [id, cached] of reviewDetailCache) {
+      if (!fresh.has(id) || fresh.get(id) !== cached.version) reviewDetailCache.delete(id);
+    }
+    const previous = new Map(pendingReviewAll.map((message) => [message.id, message]));
+    pendingReviewAll = result.records.map((message) => Object.assign(previous.get(message.id) || {}, message));
     renderReviewPriorityStats(pendingReviewAll);
     refreshSalesFilterOptions(pendingReviewAll);
     refreshRouteFilterOptions(pendingReviewAll);
@@ -1742,7 +1883,6 @@ async function loadReviewMessages() {
 
 async function loadConversationActions() {
   conversationActionsButton.disabled = true;
-  workspace.classList.add("hidden");
   setStatus("正在读取会话动作…", "running");
   try {
     const result = await request<{ records: ConversationAction[] }>(
@@ -1857,7 +1997,6 @@ function applyReviewFilters(): void {
 
 async function loadOutboxDeliveries() {
   outboxQueueButton.disabled = true;
-  workspace.classList.add("hidden");
   setStatus("正在读取 Outbox 投递队列…", "running");
   try {
     const result = await request<{ records: OutboxDelivery[] }>(
@@ -2000,3 +2139,7 @@ runtimeReportDate.addEventListener("change", () => {
 loadReviewMessages().catch(showError);
 loadDashboard().catch(() => undefined);
 loadRuntimeReports().catch(() => undefined);
+
+// Update only time labels and controls: never replace an active editor on a timer.
+window.setInterval(refreshReviewTiming, 30_000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshReviewTiming(); });

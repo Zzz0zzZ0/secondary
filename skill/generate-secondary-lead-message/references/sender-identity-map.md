@@ -13,3 +13,4 @@ outbound sender identity. Matching and usage rules are defined in `SKILL.md`.
 | `圳涛 吴` | `Lipeng Chi` | `chilipeng@okgminerals.com` |
 | `Cathy Wang` | `Buddy` | `Buddy@okgminerals.com` |
 | `张博文` | `Nikola` | `nikola@okgmineral.com` |
+| `博文 张` | `Nikola` | `nikola@okgmineral.com` |
